@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field
 
 # ── Enums ──────────────────────────────────────────────────────────────────
 
+class FlowType(str, Enum):
+    RECEIVABLE = "receivable"   # MS receives brokerage from brokers
+    PAYABLE = "payable"         # MS pays brokerage to brokers
+
+
 class BuySell(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
@@ -53,6 +58,7 @@ class PipelineStatus(str, Enum):
 class TradeRecord(BaseModel):
     """Canonical trade record — every broker format normalized to this."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    flow_type: str = FlowType.RECEIVABLE.value   # receivable | payable
     invoice_id: Optional[str] = None
     broker_name: Optional[str] = None
     invoice_date: Optional[str] = None
@@ -80,7 +86,8 @@ class TradeRecord(BaseModel):
 
 
 class MSTradeRecord(BaseModel):
-    """Row from the MS receivables database."""
+    """Row from the MS receivables / payables database."""
+    flow_type: str = FlowType.RECEIVABLE.value   # receivable | payable
     trade_id: Optional[str] = None
     trade_date: Optional[str] = None
     instrument: Optional[str] = None

@@ -15,6 +15,7 @@ from broker_recon_flow.config import get_agent_config
 from broker_recon_flow.schemas.canonical_trade import (
     TradeRecord, MSTradeRecord,
     ReconciliationResult, ReconciliationMatch, ReconciliationStatus,
+    FlowType,
 )
 from broker_recon_flow.services import ms_data_service as ms_svc
 from broker_recon_flow.utils.logger import get_logger
@@ -25,12 +26,13 @@ logger = get_logger(__name__)
 def run_reconciliation(
     broker_trades: list[TradeRecord],
     broker_name: str | None = None,
+    flow_type: str = FlowType.RECEIVABLE.value,
 ) -> ReconciliationResult:
-    """Reconcile broker trades against MS receivables data."""
-    ms_trades = ms_svc.get_all_ms_trades()
+    """Reconcile broker trades against MS data (receivables or payables)."""
+    ms_trades = ms_svc.get_all_ms_trades(flow_type=flow_type)
     logger.info(
-        "Reconciling %d broker trades against %d MS trades (broker=%s)",
-        len(broker_trades), len(ms_trades), broker_name,
+        "Reconciling %d broker trades against %d MS trades (broker=%s, flow=%s)",
+        len(broker_trades), len(ms_trades), broker_name, flow_type,
     )
 
     cfg = get_agent_config("reconciliation")

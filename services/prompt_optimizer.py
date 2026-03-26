@@ -290,7 +290,10 @@ def run_optimization(
 
         # Run current prompt against synthetic data
         extracted_raw = invoke_llm_json(current_prompt, f"Broker: {broker_name}\n\n{synthetic_text}")
-        extracted_trades = extracted_raw.get("trades", [])
+        if isinstance(extracted_raw, list):
+            extracted_trades = extracted_raw
+        else:
+            extracted_trades = extracted_raw.get("trades", [])
 
         # Evaluate
         evaluation = invoke_llm_json(
@@ -348,10 +351,11 @@ def run_optimization(
             prev_text = prev.get("synthetic_text", "")
             if prev_text:
                 regress_raw = invoke_llm_json(current_prompt, f"Broker: {broker_name}\n\n{prev_text}")
+                regress_trades = regress_raw if isinstance(regress_raw, list) else regress_raw.get("trades", [])
                 regress_eval = invoke_llm_json(
                     EVALUATOR_PROMPT.format(
                         expected=_safe_json(prev.get("expected_trades", [])),
-                        extracted=_safe_json(regress_raw.get("trades", [])),
+                        extracted=_safe_json(regress_trades),
                     ),
                     "Regression check on previous variation.",
                 )
@@ -366,7 +370,7 @@ def run_optimization(
         best_prompt,
         f"Broker: {broker_name}\n\n{doc_text[:10000]}",
     )
-    audit_trades = audit_result.get("trades", [])
+    audit_trades = audit_result if isinstance(audit_result, list) else audit_result.get("trades", [])
 
     # If we have expected trades (from HITL approval), evaluate against them
     if expected_trades:

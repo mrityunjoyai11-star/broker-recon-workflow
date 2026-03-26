@@ -18,9 +18,9 @@ logger = get_logger(__name__)
 
 
 @router.get("/ms-data")
-def ms_data_info():
-    """Return stats about the loaded MS receivables data."""
-    return JSONResponse(ms_data_stats())
+def ms_data_info(flow_type: str = Query(default="receivable")):
+    """Return stats about loaded MS data for the given flow type."""
+    return JSONResponse(ms_data_stats(flow_type=flow_type))
 
 
 @router.get("/sessions")
@@ -35,6 +35,7 @@ def list_sessions(limit: int = 50, db: Session = Depends(get_db)):
     return JSONResponse([
         {
             "id": r.id,
+            "flow_type": getattr(r, "flow_type", "receivable"),
             "broker_name": r.broker_name,
             "invoice_id": r.invoice_id,
             "status": r.status,

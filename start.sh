@@ -7,6 +7,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"  # ms_payables/
 
+# Load .env file if present (sets ANTHROPIC_API_KEY etc.)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+    echo "Loaded environment from .env"
+fi
+
 # Use venv if it exists — check project dir first, then parent
 VENV_DIR="$SCRIPT_DIR/venv"
 if [ ! -d "$VENV_DIR" ]; then
@@ -25,7 +33,7 @@ start_api() {
     echo "Starting FastAPI backend..."
     uvicorn broker_recon_flow.backend.main:app \
         --host 0.0.0.0 \
-        --port 8001 \
+        --port 8020 \
         --reload \
         --app-dir "$ROOT_DIR"
 }
@@ -33,7 +41,7 @@ start_api() {
 start_ui() {
     echo "Starting Streamlit frontend..."
     streamlit run "$SCRIPT_DIR/ui/app.py" \
-        --server.port 8501 \
+        --server.port 8502 \
         --server.address 0.0.0.0 \
         --server.headless true
 }
@@ -53,9 +61,9 @@ case "$MODE" in
         UI_PID=$!
         echo ""
         echo "============================================"
-        echo "  API:  http://localhost:8001"
-        echo "  UI:   http://localhost:8501"
-        echo "  Docs: http://localhost:8001/docs"
+        echo "  API:  http://localhost:8020"
+        echo "  UI:   http://localhost:8502"
+        echo "  Docs: http://localhost:8020/docs"
         echo "============================================"
         echo "Press Ctrl+C to stop both services"
         wait $API_PID $UI_PID

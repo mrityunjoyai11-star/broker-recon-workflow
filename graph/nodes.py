@@ -154,7 +154,7 @@ def reconcile_node(state: GraphState) -> dict:
 
     # Ensure MS data is loaded
     if not state.ms_data_loaded:
-        ms_svc.load_ms_data()
+        ms_svc.load_ms_data(flow_type=state.flow_type)
         updates["ms_data_loaded"] = True
 
     try:
@@ -162,6 +162,7 @@ def reconcile_node(state: GraphState) -> dict:
         result = reconcile_agent.run_reconciliation(
             broker_trades=broker_trades,
             broker_name=state.broker_name,
+            flow_type=state.flow_type,
         )
         updates["reconciliation"] = result
         log = (
@@ -318,44 +319,74 @@ def sipdo_optimize_node(state: GraphState) -> dict:
 # ── Node: SIPDO Background ──────────────────────────────────────────────────
 # After persist (quick path only): runs SIPDO using HITL-approved trades as
 # ground truth and caches the result for future uploads from this broker.
+# The actual optimization is fire-and-forget in a daemon thread so the graph
+# stream returns immediately (no Redis / message broker needed).
 
-def sipdo_background_node(state: GraphState) -> dict:
-    logger.info("[sipdo_background] session=%s, broker=%s", state.session_id, state.broker_name)
-    updates: dict = {"current_step": "sipdo_background"}
-
+def _sipdo_background_worker(
+    session_id: str,
+    broker_name: str,
+    pdf_path: str | None,
+    excel_path: str | None,
+    approved_trades: list[dict] | None,
+) -> None:
+    """Run SIPDO optimization in a background thread (fire-and-forget)."""
     try:
         from broker_recon_flow.services.prompt_optimizer import run_optimization
-
-        approved_trades = None
-        if state.extraction and state.extraction.trades:
-            approved_trades = [t.to_dict() for t in state.extraction.trades]
+        from broker_recon_flow.services.prompt_cache import save_optimized_prompt
 
         result = run_optimization(
-            broker_name=state.broker_name or "unknown",
-            pdf_path=state.pdf_path,
-            excel_path=state.excel_path,
+            broker_name=broker_name,
+            pdf_path=pdf_path,
+            excel_path=excel_path,
             expected_trades=approved_trades,
-            progress_callback=lambda msg: logger.info("[sipdo_background] %s", msg),
+            progress_callback=lambda msg: logger.info("[sipdo_bg_thread:%s] %s", session_id, msg),
         )
-
-        from broker_recon_flow.services.prompt_cache import save_optimized_prompt
         save_optimized_prompt(
-            broker_name=state.broker_name or "unknown",
+            broker_name=broker_name,
             prompt_text=result.get("optimized_prompt", ""),
             accuracy_score=result.get("accuracy_score", 0.0),
             optimization_trace=result.get("trace", []),
-            source_session_id=state.session_id,
+            source_session_id=session_id,
         )
-        updates["logs"] = state.logs + [
-            f"Background SIPDO: optimized prompt cached for '{state.broker_name}' "
-            f"(accuracy={result.get('accuracy_score', 0):.0%})"
-        ]
+        logger.info(
+            "[sipdo_bg_thread:%s] Done — cached prompt for '%s' (accuracy=%s)",
+            session_id, broker_name, f"{result.get('accuracy_score', 0):.0%}",
+        )
     except Exception as exc:
-        logger.exception("sipdo_background error")
-        updates["logs"] = state.logs + [f"Background SIPDO failed (non-fatal): {exc}"]
+        logger.exception("[sipdo_bg_thread:%s] SIPDO background failed (non-fatal)", session_id)
 
-    updates["status"] = PipelineStatus.COMPLETED.value
-    return updates
+
+def sipdo_background_node(state: GraphState) -> dict:
+    import threading
+
+    logger.info("[sipdo_background] session=%s, broker=%s — spawning background thread", state.session_id, state.broker_name)
+
+    approved_trades = None
+    if state.extraction and state.extraction.trades:
+        approved_trades = [t.to_dict() for t in state.extraction.trades]
+
+    thread = threading.Thread(
+        target=_sipdo_background_worker,
+        args=(
+            state.session_id,
+            state.broker_name or "unknown",
+            state.pdf_path,
+            state.excel_path,
+            approved_trades,
+        ),
+        daemon=True,
+        name=f"sipdo-bg-{state.session_id[:8]}",
+    )
+    thread.start()
+
+    return {
+        "current_step": "sipdo_background",
+        "status": PipelineStatus.COMPLETED.value,
+        "logs": state.logs + [
+            f"Background SIPDO optimization started for '{state.broker_name}' — "
+            "prompt will be cached when ready (check logs for progress)."
+        ],
+    }
 
 
 # ── Routing functions ────────────────────────────────────────────────────────

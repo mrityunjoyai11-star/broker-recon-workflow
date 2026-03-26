@@ -1,4 +1,4 @@
-"""LangGraph shared state for the 7-node reconciliation pipeline."""
+"""LangGraph shared state for the reconciliation pipeline."""
 
 from __future__ import annotations
 
@@ -8,17 +8,21 @@ from pydantic import BaseModel, Field
 
 from broker_recon_flow.schemas.canonical_trade import (
     VerificationResult, ClassificationResult, ExtractionResult,
-    ReconciliationResult, PipelineStatus,
+    ReconciliationResult, PipelineStatus, FlowType,
 )
 
 
 class GraphState(BaseModel):
-    """Shared state flowing through all 7 nodes of the pipeline."""
+    """Shared state flowing through all nodes of the pipeline."""
 
     # ── Input ────────────────────────────────────────────────────────────
     session_id: str = ""
+    flow_type: str = FlowType.RECEIVABLE.value   # "receivable" | "payable"
     pdf_path: Optional[str] = None
     excel_path: Optional[str] = None
+    # Multi-file support: additional file paths beyond the primary pair
+    pdf_paths: List[str] = Field(default_factory=list)
+    excel_paths: List[str] = Field(default_factory=list)
     broker_hint: Optional[str] = None   # optional hint from upload form
 
     # ── Pipeline control ─────────────────────────────────────────────────

@@ -18,7 +18,10 @@ class StartRequest(BaseModel):
     session_id: str
     pdf_path: str
     excel_path: str
+    pdf_paths: list[str] = []
+    excel_paths: list[str] = []
     broker_hint: str = ""
+    flow_type: str = "receivable"
 
 
 class ResumeRequest(BaseModel):
@@ -51,6 +54,7 @@ def _serialise_state(state: GraphState) -> dict:
     """Convert GraphState to a JSON-safe dict for the response."""
     data = {
         "session_id": state.session_id,
+        "flow_type": state.flow_type,
         "status": state.status,
         "current_step": state.current_step,
         "error": state.error,
@@ -99,8 +103,11 @@ async def start_pipeline(req: StartRequest):
 
     initial_state = GraphState(
         session_id=req.session_id,
+        flow_type=req.flow_type,
         pdf_path=req.pdf_path,
         excel_path=req.excel_path,
+        pdf_paths=req.pdf_paths or [req.pdf_path],
+        excel_paths=req.excel_paths or [req.excel_path],
         broker_hint=req.broker_hint or None,
     )
 

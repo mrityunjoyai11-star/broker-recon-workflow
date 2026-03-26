@@ -23,9 +23,14 @@ def get_engine():
         cfg = get_db_config()
         db_url = cfg.get("url", "sqlite:///data/reconciliation.db")
 
-        # Ensure directory exists for SQLite
+        # Resolve relative SQLite paths against the project root (broker_recon_flow/)
+        # so the DB is always created inside the project regardless of CWD.
         if db_url.startswith("sqlite:///"):
             db_path = db_url.replace("sqlite:///", "")
+            if not Path(db_path).is_absolute():
+                project_root = Path(__file__).parent.parent  # broker_recon_flow/
+                db_path = str(project_root / db_path)
+                db_url = f"sqlite:///{db_path}"
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
         _engine = create_engine(

@@ -1,9 +1,10 @@
-"""MS Receivables Data Service.
+"""MS Data Service — Receivables AND Payables.
 
-Loads the MS receivables Excel on first use and provides fast lookup
-by trade_id, composite key (date + instrument + account), and full scan.
+Loads MS receivables and payables Excel files on first use and provides
+fast lookup by trade_id, composite key (date + instrument + account), and
+full scan.  Each flow type is indexed separately.
 
-The MS data is READ-ONLY. We never write back to the source file.
+The MS data is READ-ONLY. We never write back to the source files.
 """
 
 from __future__ import annotations
@@ -14,16 +15,13 @@ from typing import Optional
 import pandas as pd
 
 from broker_recon_flow.config import get_ms_data_config
-from broker_recon_flow.schemas.canonical_trade import MSTradeRecord
+from broker_recon_flow.schemas.canonical_trade import MSTradeRecord, FlowType
 from broker_recon_flow.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Singleton state ─────────────────────────────────────────────────────────
-_df: Optional[pd.DataFrame] = None
-_trade_id_index: dict[str, list[dict]] = {}     # trade_id → [row dicts]
-_composite_index: dict[str, list[dict]] = {}    # "date|instrument|account" → [row dicts]
-_ms_trades_cache: Optional[list] = None          # cached MSTradeRecord list
+# ── Per-flow-type singleton state ────────────────────────────────────────────
+_datasets: dict[str, dict] = {}   # key = flow_type value → {"df", "tid_idx", "comp_idx", "cache"}
 
 # Canonical column name aliases: map whatever MS uses → standard name
 _MS_COLUMN_ALIASES: dict[str, str] = {
@@ -130,8 +128,9 @@ def _normalize_ms_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _row_to_ms_trade(row: dict) -> MSTradeRecord:
+def _row_to_ms_trade(row: dict, flow_type: str = FlowType.RECEIVABLE.value) -> MSTradeRecord:
     return MSTradeRecord(
+        flow_type=flow_type,
         trade_id=str(row.get("trade_id", "")) or None,
         trade_date=str(row.get("trade_date", "")) or None,
         instrument=str(row.get("instrument", "")) or None,
@@ -156,89 +155,104 @@ def _safe_float(val) -> Optional[float]:
         return None
 
 
-def load_ms_data(force_reload: bool = False) -> pd.DataFrame:
-    """Load MS receivables Excel into memory (singleton). Returns normalized DataFrame."""
-    global _df, _trade_id_index, _composite_index, _ms_trades_cache
-
-    if _df is not None and not force_reload:
-        return _df
-
+def _resolve_file_path(flow_type: str) -> Path:
+    """Return the absolute path for the MS data Excel for the given flow type."""
     cfg = get_ms_data_config()
-    raw_path = cfg.get("file_path", "")
-
-    # Resolve path relative to broker_recon_flow/
     base = Path(__file__).parent.parent
-    file_path = (base / raw_path).resolve()
+
+    if flow_type == FlowType.PAYABLE.value:
+        raw = cfg.get("payables_file", "")
+    else:
+        # Default / receivable — also support legacy "file_path" key
+        raw = cfg.get("receivables_file", "") or cfg.get("file_path", "")
+
+    return (base / raw).resolve()
+
+
+def load_ms_data(flow_type: str = FlowType.RECEIVABLE.value, force_reload: bool = False) -> pd.DataFrame:
+    """Load MS Excel for the given flow type (singleton per type). Returns normalized DataFrame."""
+    global _datasets
+
+    ds = _datasets.get(flow_type)
+    if ds is not None and not force_reload:
+        return ds["df"]
+
+    file_path = _resolve_file_path(flow_type)
 
     if not file_path.exists():
-        logger.warning("MS data file not found: %s. Continuing with empty dataset.", file_path)
-        _df = pd.DataFrame()
-        _ms_trades_cache = []
-        return _df
+        logger.warning("MS %s data file not found: %s. Continuing with empty dataset.", flow_type, file_path)
+        _datasets[flow_type] = {"df": pd.DataFrame(), "tid_idx": {}, "comp_idx": {}, "cache": []}
+        return _datasets[flow_type]["df"]
 
-    logger.info("Loading MS receivables data from %s", file_path)
+    logger.info("Loading MS %s data from %s", flow_type, file_path)
     try:
-        _df = pd.read_excel(file_path, dtype=str)
+        df = pd.read_excel(file_path, dtype=str)
     except Exception as exc:
-        logger.error("Failed to load MS data: %s", exc)
-        _df = pd.DataFrame()
-        _ms_trades_cache = []
-        return _df
+        logger.error("Failed to load MS %s data: %s", flow_type, exc)
+        _datasets[flow_type] = {"df": pd.DataFrame(), "tid_idx": {}, "comp_idx": {}, "cache": []}
+        return _datasets[flow_type]["df"]
 
-    _df = _normalize_ms_columns(_df)
-    _df = _df.fillna("")
+    df = _normalize_ms_columns(df)
+    df = df.fillna("")
 
-    # Build indexes — use lists to handle duplicate keys
-    _trade_id_index = {}
-    _composite_index = {}
-    for _, row in _df.iterrows():
+    # Build indexes
+    tid_idx: dict[str, list[dict]] = {}
+    comp_idx: dict[str, list[dict]] = {}
+    for _, row in df.iterrows():
         row_dict = row.to_dict()
         tid = str(row_dict.get("trade_id", "")).strip()
         if tid:
-            _trade_id_index.setdefault(tid.upper(), []).append(row_dict)
+            tid_idx.setdefault(tid.upper(), []).append(row_dict)
 
         date = str(row_dict.get("trade_date", "")).strip()
         instr = str(row_dict.get("instrument", "")).strip()
         acct = str(row_dict.get("client_account", "")).strip()
         composite = f"{date}|{instr.upper()}|{acct.upper()}"
         if date or instr:
-            _composite_index.setdefault(composite, []).append(row_dict)
+            comp_idx.setdefault(composite, []).append(row_dict)
 
-    # Cache the MSTradeRecord list
-    _ms_trades_cache = [_row_to_ms_trade(row.to_dict()) for _, row in _df.iterrows()]
+    cache = [_row_to_ms_trade(row.to_dict(), flow_type) for _, row in df.iterrows()]
+
+    _datasets[flow_type] = {"df": df, "tid_idx": tid_idx, "comp_idx": comp_idx, "cache": cache}
 
     logger.info(
-        "MS data loaded: %d rows, %d trade_id entries, %d composite entries",
-        len(_df),
-        len(_trade_id_index),
-        len(_composite_index),
+        "MS %s data loaded: %d rows, %d trade_id entries, %d composite entries",
+        flow_type, len(df), len(tid_idx), len(comp_idx),
     )
-    return _df
+    return df
 
 
-def find_by_trade_id(trade_id: str) -> Optional[MSTradeRecord]:
-    load_ms_data()
-    rows = _trade_id_index.get(trade_id.upper().strip(), [])
-    return _row_to_ms_trade(rows[0]) if rows else None
+def find_by_trade_id(trade_id: str, flow_type: str = FlowType.RECEIVABLE.value) -> Optional[MSTradeRecord]:
+    load_ms_data(flow_type)
+    ds = _datasets.get(flow_type, {})
+    rows = ds.get("tid_idx", {}).get(trade_id.upper().strip(), [])
+    return _row_to_ms_trade(rows[0], flow_type) if rows else None
 
 
-def find_by_composite(trade_date: str, instrument: str, client_account: str = "") -> Optional[MSTradeRecord]:
-    load_ms_data()
+def find_by_composite(
+    trade_date: str, instrument: str, client_account: str = "",
+    flow_type: str = FlowType.RECEIVABLE.value,
+) -> Optional[MSTradeRecord]:
+    load_ms_data(flow_type)
+    ds = _datasets.get(flow_type, {})
     key = f"{trade_date.strip()}|{instrument.strip().upper()}|{client_account.strip().upper()}"
-    rows = _composite_index.get(key, [])
-    return _row_to_ms_trade(rows[0]) if rows else None
+    rows = ds.get("comp_idx", {}).get(key, [])
+    return _row_to_ms_trade(rows[0], flow_type) if rows else None
 
 
-def get_all_ms_trades() -> list[MSTradeRecord]:
-    load_ms_data()
-    return list(_ms_trades_cache or [])
+def get_all_ms_trades(flow_type: str = FlowType.RECEIVABLE.value) -> list[MSTradeRecord]:
+    load_ms_data(flow_type)
+    ds = _datasets.get(flow_type, {})
+    return list(ds.get("cache", []))
 
 
-def ms_data_stats() -> dict:
-    df = load_ms_data()
+def ms_data_stats(flow_type: str = FlowType.RECEIVABLE.value) -> dict:
+    df = load_ms_data(flow_type)
+    ds = _datasets.get(flow_type, {})
     return {
+        "flow_type": flow_type,
         "total_rows": len(df),
         "columns": list(df.columns),
-        "trade_id_count": len(_trade_id_index),
-        "composite_count": len(_composite_index),
+        "trade_id_count": len(ds.get("tid_idx", {})),
+        "composite_count": len(ds.get("comp_idx", {})),
     }

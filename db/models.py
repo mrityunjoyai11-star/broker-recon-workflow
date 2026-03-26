@@ -23,6 +23,7 @@ class ReconciliationSession(Base):
     __tablename__ = "reconciliation_sessions"
 
     id = Column(String, primary_key=True, default=_uuid)
+    flow_type = Column(String, default="receivable")   # receivable | payable
     broker_name = Column(String, nullable=True)
     invoice_id = Column(String, nullable=True)
     pdf_filename = Column(String, nullable=True)

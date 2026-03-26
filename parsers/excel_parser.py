@@ -96,7 +96,9 @@ class ExcelParser:
             if score > best_score:
                 best_score = score
                 best_sheet = df
-        return best_sheet or max(sheets.values(), key=len)
+        if best_sheet is not None:
+            return best_sheet
+        return max(sheets.values(), key=len)
 
     def detect_broker_keywords(self, keywords: list[str]) -> list[str]:
         if self._raw_sheets is None:

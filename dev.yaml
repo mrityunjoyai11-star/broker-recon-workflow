@@ -11,12 +11,12 @@ app:
 # --- FastAPI Server ---
 server:
   host: "0.0.0.0"
-  port: 8001
+  port: 8020
   reload: true
 
 # --- Streamlit UI ---
 ui:
-  api_base_url: "http://localhost:8001"
+  api_base_url: "http://localhost:8020"
   page_title: "Brokerage Reconciliation"
   page_icon: "📊"
   layout: "wide"
@@ -46,7 +46,8 @@ database:
 
 # --- MS Receivables Data ---
 ms_data:
-  file_path: "documentation/ms_receivables_client_base_data.xlsx"  # relative to broker_recon_flow/
+  receivables_file: "data/sample_ms_receivables.xlsx"  # relative to broker_recon_flow/
+  payables_file: "data/sample_ms_payables.xlsx"        # relative to broker_recon_flow/
   index_columns:
     - "trade_id"
     - "trade_date"

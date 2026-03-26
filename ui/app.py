@@ -46,6 +46,10 @@ st.markdown("""
                  border-radius: 4px; font-weight: bold; font-size: 0.8rem; }
     .missing-badge { background-color: #fff3cd; color: #856404; padding: 2px 8px;
                      border-radius: 4px; font-weight: bold; font-size: 0.8rem; }
+    .step-done { color: #28a745; font-weight: 600; }
+    .step-active { color: #fd7e14; font-weight: 600; }
+    .step-pending { color: #6c757d; }
+    .step-failed { color: #dc3545; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -64,6 +68,71 @@ for k, v in _DEFAULTS.items():
 
 
 # ── Navigation ───────────────────────────────────────────────────────────────
+
+# Pipeline steps in order, keyed by the status value that means this step is
+# currently running.  Steps earlier than the current status are "done".
+_PIPELINE_STEPS = [
+    ("verifying",    "Verify Documents"),
+    ("classifying",  "Classify Broker"),
+    ("sipdo_choice", "SIPDO Choice"),
+    ("optimizing",   "Optimize Prompt"),
+    ("extracting",   "Extract Trades"),
+    ("hitl_review",  "HITL Review"),
+    ("reconciling",  "Reconcile vs MS"),
+    ("generating",   "Generate Report"),
+    ("persisting",   "Persist Results"),
+    ("completed",    "Done"),
+]
+
+
+def _render_step_tracker(state: dict):
+    """Render a step-by-step progress indicator in the sidebar."""
+    status = state.get("status", "")
+    is_unknown = state.get("is_unknown_broker", False)
+
+    # Build ordered list; skip sipdo_choice/optimizing when broker is known
+    steps = []
+    for key, label in _PIPELINE_STEPS:
+        if key in ("sipdo_choice", "optimizing") and not is_unknown:
+            continue
+        steps.append((key, label))
+
+    # Find current step index
+    current_idx = -1
+    for i, (key, _) in enumerate(steps):
+        if key == status:
+            current_idx = i
+            break
+
+    # If status is "failed", mark the failed step
+    failed = status == "failed"
+    failed_step = state.get("current_step", "")
+
+    st.markdown("**Pipeline Progress**")
+    for i, (key, label) in enumerate(steps):
+        if failed and key == failed_step:
+            st.markdown(f'<span class="step-failed">✗ {label}</span>', unsafe_allow_html=True)
+        elif failed and i < current_idx:
+            st.markdown(f'<span class="step-done">✓ {label}</span>', unsafe_allow_html=True)
+        elif i < current_idx:
+            st.markdown(f'<span class="step-done">✓ {label}</span>', unsafe_allow_html=True)
+        elif i == current_idx:
+            if key == "completed":
+                st.markdown(f'<span class="step-done">✓ {label}</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span class="step-active">⏳ {label}</span>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<span class="step-pending">○ {label}</span>', unsafe_allow_html=True)
+
+    # Show recent pipeline log entries below the tracker
+    logs = state.get("logs", [])
+    if logs:
+        st.markdown("---")
+        st.markdown("**Recent Activity**")
+        for log in logs[-4:]:
+            st.caption(log)
+
+
 def nav():
     pages = ["Upload", "Review", "Results", "History", "MS Data", "Prompt Cache"]
     with st.sidebar:
@@ -77,11 +146,7 @@ def nav():
             st.markdown("---")
             state = st.session_state.pipeline_state or {}
             st.caption(f"**Session:** `{st.session_state.session_id[:8]}…`")
-            status = state.get("status", "")
-            step = state.get("current_step", "")
-            st.caption(f"**Status:** {status}")
-            if step:
-                st.caption(f"**Step:** {step}")
+            _render_step_tracker(state)
 
 
 # ── API helpers ──────────────────────────────────────────────────────────────
@@ -121,32 +186,44 @@ def _poll_state(session_id: str, target_statuses: set[str], max_wait: int = 5) -
 # ── Page: Upload ─────────────────────────────────────────────────────────────
 def page_upload():
     st.header("📤 Upload Broker Documents")
-    st.markdown("Upload a matching PDF invoice and Excel confirmation file from the same broker.")
+    st.markdown("Upload matching PDF invoices and Excel confirmation files from the same broker.")
 
     with st.form("upload_form"):
-        broker_hint = st.text_input(
-            "Broker name (optional hint)",
-            placeholder="e.g. BNP Paribas, JP Morgan, Marex…",
-        )
-        pdf_file = st.file_uploader("PDF Statement", type=["pdf"])
-        excel_file = st.file_uploader("Excel Confirmation", type=["xlsx", "xls", "csv"])
+        col_a, col_b = st.columns(2)
+        with col_a:
+            flow_type = st.selectbox(
+                "Flow Type",
+                ["receivable", "payable"],
+                format_func=lambda x: "Receivable (MS receives)" if x == "receivable" else "Payable (MS pays)",
+                help="Receivable: MS receives brokerage from broker. Payable: MS pays brokerage to broker.",
+            )
+        with col_b:
+            broker_hint = st.text_input(
+                "Broker name (optional hint)",
+                placeholder="e.g. BNP Paribas, JP Morgan, Marex…",
+            )
+        pdf_files = st.file_uploader("PDF Statement(s)", type=["pdf"], accept_multiple_files=True)
+        excel_files = st.file_uploader("Excel Confirmation(s)", type=["xlsx", "xls", "csv"], accept_multiple_files=True)
         submitted = st.form_submit_button("Upload & Run Pipeline", type="primary")
 
     if submitted:
-        if not pdf_file or not excel_file:
-            st.error("Please upload both a PDF and an Excel file.")
+        if not pdf_files or not excel_files:
+            st.error("Please upload at least one PDF and one Excel file.")
             return
 
-        # Upload files
+        # Upload files — send as multi-file
         with st.spinner("Uploading files…"):
+            files_payload = []
+            for pf in pdf_files:
+                files_payload.append(("pdf_file", (pf.name, pf.getvalue(), "application/pdf")))
+            for ef in excel_files:
+                files_payload.append(("excel_file", (ef.name, ef.getvalue(),
+                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")))
+
             resp = _post(
                 "/api/upload",
-                files={
-                    "pdf_file": (pdf_file.name, pdf_file.getvalue(), "application/pdf"),
-                    "excel_file": (excel_file.name, excel_file.getvalue(),
-                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-                },
-                data={"broker_hint": broker_hint},
+                files=files_payload,
+                data={"broker_hint": broker_hint, "flow_type": flow_type},
             )
 
         if not resp:
@@ -155,7 +232,10 @@ def page_upload():
         st.session_state.session_id = resp["session_id"]
         st.session_state.pdf_path = resp["pdf_path"]
         st.session_state.excel_path = resp["excel_path"]
-        st.success(f"Uploaded! Session `{resp['session_id'][:8]}…`")
+        st.success(f"Uploaded! Session `{resp['session_id'][:8]}…` ({resp.get('flow_type', 'receivable')})")
+
+        if len(pdf_files) > 1 or len(excel_files) > 1:
+            st.info(f"📎 Multi-file session: {len(pdf_files)} PDFs, {len(excel_files)} Excels")
 
         # Run Phase 1: verify → classify → extract → HITL
         progress = st.progress(0, text="Phase 1: Verifying documents…")
@@ -163,8 +243,11 @@ def page_upload():
             "/api/pipeline/start",
             json={
                 "session_id": resp["session_id"],
+                "flow_type": flow_type,
                 "pdf_path": resp["pdf_path"],
                 "excel_path": resp["excel_path"],
+                "pdf_paths": resp.get("pdf_paths", [resp["pdf_path"]]),
+                "excel_paths": resp.get("excel_paths", [resp["excel_path"]]),
                 "broker_hint": broker_hint,
             },
         )
@@ -213,17 +296,49 @@ def page_review():
     if status == "optimizing":
         st.info("🎯 **SIPDO Prompt Optimization in progress…**")
         st.markdown(f"Generating an optimized extraction prompt for **{state.get('broker_name', 'Unknown')}**")
-        progress_bar = st.progress(0, text="Optimizing…")
-        # Show current logs
+
+        # Parse SIPDO steps from logs to show a live step checklist
         logs = state.get("logs", [])
-        sipdo_logs = [l for l in logs if "SIPDO" in l]
-        if sipdo_logs:
-            for log in sipdo_logs[-5:]:
+        sipdo_logs = [l for l in logs if "SIPDO" in l or "sipdo" in l.lower()]
+
+        # Define the SIPDO pipeline stages and check which are done
+        sipdo_stages = [
+            ("Step 1", "Analyzing document structure"),
+            ("Step 2", "Decomposing extraction fields"),
+            ("Step 3", "Generating seed extraction prompt"),
+            ("Step 4", "Optimization iterations"),
+            ("Step 5", "Consistency audit"),
+        ]
+
+        completed_steps = 0
+        for key, label in sipdo_stages:
+            found = any(key in l for l in sipdo_logs)
+            if found:
+                completed_steps += 1
+
+        # Progress bar based on completed SIPDO stages
+        progress_pct = min(int(completed_steps / len(sipdo_stages) * 100), 95)
+        st.progress(progress_pct, text=f"SIPDO: {completed_steps}/{len(sipdo_stages)} stages complete")
+
+        # Show live stage checklist
+        st.markdown("##### Optimization Stages")
+        for key, label in sipdo_stages:
+            found = any(key in l for l in sipdo_logs)
+            if found:
+                st.markdown(f'<span class="step-done">✓ {label}</span>', unsafe_allow_html=True)
+            elif completed_steps > 0:
+                # First unfinished stage after at least one completed = active
+                st.markdown(f'<span class="step-active">⏳ {label}</span>', unsafe_allow_html=True)
+                completed_steps = -1  # mark remaining as pending
+            else:
+                st.markdown(f'<span class="step-pending">○ {label}</span>', unsafe_allow_html=True)
+
+        # Show iteration detail if available
+        iter_logs = [l for l in sipdo_logs if "iteration" in l.lower() or "accuracy" in l.lower()]
+        if iter_logs:
+            st.markdown("##### Iteration Details")
+            for log in iter_logs[-6:]:
                 st.caption(log)
-            # Estimate progress from iteration count
-            iter_logs = [l for l in sipdo_logs if "iteration" in l.lower() or "Iteration" in l]
-            progress_pct = min(len(iter_logs) / 4 * 80 + 20, 95)
-            progress_bar.progress(int(progress_pct), text=sipdo_logs[-1] if sipdo_logs else "Optimizing…")
 
         # Poll for completion
         with st.spinner("Waiting for optimization to finish…"):
@@ -245,6 +360,12 @@ def page_review():
     # If pipeline is still running, show progress with auto-refresh
     if status not in ("hitl_review", "completed", "failed") and not hitl_pending:
         st.info(f"Pipeline is running… (status: **{status}**)")
+        # Show recent logs so user sees what's happening
+        logs = state.get("logs", [])
+        if logs:
+            st.markdown("##### Live Progress")
+            for log in logs[-5:]:
+                st.caption(log)
         with st.spinner("Waiting for extraction to complete…"):
             refreshed = _poll_state(
                 state["session_id"],
