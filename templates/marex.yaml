@@ -1,0 +1,66 @@
+# Marex - Broker Template Definition
+broker_name: "Marex"
+aliases:
+  - "Marex"
+  - "MAREX"
+  - "Marex Spectron"
+  - "Marex Solutions"
+
+pdf:
+  header_patterns:
+    - "Marex"
+    - "MAREX"
+    - "Marex Spectron"
+  invoice_id_patterns:
+    - "Invoice\\s*#?\\s*:?\\s*(\\S+)"
+    - "Statement\\s*:?\\s*(\\S+)"
+  date_patterns:
+    - "Date\\s*:?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})"
+  table_start_keywords:
+    - "Trade Date"
+    - "Deal Ref"
+    - "Details"
+  table_end_keywords:
+    - "Total"
+    - "Amount Due"
+
+column_mappings:
+  "Trade Date": "trade_date"
+  "Execution Date": "trade_date"
+  "Deal Ref": "trade_id"
+  "Trade Reference": "trade_id"
+  "Order ID": "trade_id"
+  "Product": "instrument"
+  "Instrument": "instrument"
+  "Contract Description": "instrument"
+  "Exchange": "exchange"
+  "Market": "exchange"
+  "Buy/Sell": "buy_sell"
+  "Side": "buy_sell"
+  "B/S": "buy_sell"
+  "Quantity": "quantity"
+  "Volume": "quantity"
+  "Size": "quantity"
+  "Unit": "unit"
+  "Price": "price"
+  "Execution Price": "price"
+  "Delivery Start": "delivery_start"
+  "Period Start": "delivery_start"
+  "Delivery End": "delivery_end"
+  "Period End": "delivery_end"
+  "Counterparty": "counterparty"
+  "Client Name": "counterparty"
+  "Brokerage": "brokerage_amount"
+  "Commission": "brokerage_amount"
+  "Fees": "brokerage_amount"
+  "Brokerage Rate": "brokerage_rate"
+  "Rate": "brokerage_rate"
+  "Currency": "currency"
+  "Ccy": "currency"
+
+value_rules:
+  buy_sell:
+    "B|Buy|BUY|BOUGHT": "BUY"
+    "S|Sell|SELL|SOLD": "SELL"
+  currency:
+    default: "USD"

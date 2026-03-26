@@ -1,0 +1,63 @@
+# ICAP / TP ICAP - Broker Template Definition
+broker_name: "ICAP / TP ICAP"
+aliases:
+  - "ICAP"
+  - "TP ICAP"
+  - "Tullett Prebon"
+  - "TP ICAP PLC"
+
+pdf:
+  header_patterns:
+    - "ICAP"
+    - "TP ICAP"
+    - "Tullett Prebon"
+  invoice_id_patterns:
+    - "Invoice\\s*#?\\s*:?\\s*(\\S+)"
+    - "Statement\\s*No\\s*:?\\s*(\\S+)"
+  date_patterns:
+    - "Date\\s*:?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})"
+  table_start_keywords:
+    - "Trade Date"
+    - "Deal ID"
+    - "Transaction"
+  table_end_keywords:
+    - "Total"
+    - "Summary"
+
+column_mappings:
+  "Trade Date": "trade_date"
+  "Value Date": "trade_date"
+  "Deal ID": "trade_id"
+  "Trade Ref": "trade_id"
+  "Transaction ID": "trade_id"
+  "Product": "instrument"
+  "Instrument": "instrument"
+  "Contract": "instrument"
+  "Exchange": "exchange"
+  "Venue": "exchange"
+  "Buy/Sell": "buy_sell"
+  "Side": "buy_sell"
+  "B/S": "buy_sell"
+  "Quantity": "quantity"
+  "Volume": "quantity"
+  "No. of Lots": "quantity"
+  "Unit": "unit"
+  "Price": "price"
+  "Exec Price": "price"
+  "Delivery Start": "delivery_start"
+  "Delivery End": "delivery_end"
+  "Tenor": "delivery_start"
+  "Counterparty": "counterparty"
+  "Client": "counterparty"
+  "Brokerage": "brokerage_amount"
+  "Commission": "brokerage_amount"
+  "Brokerage Rate": "brokerage_rate"
+  "Currency": "currency"
+  "CCY": "currency"
+
+value_rules:
+  buy_sell:
+    "B|Buy|BUY": "BUY"
+    "S|Sell|SELL": "SELL"
+  currency:
+    default: "USD"

@@ -1,0 +1,69 @@
+# Evolution Markets - Broker Template Definition
+broker_name: "Evolution Markets"
+aliases:
+  - "Evolution Markets"
+  - "EVOLUTION"
+  - "EVM"
+  - "Evolution Markets LLC"
+
+# PDF parsing hints
+pdf:
+  header_patterns:
+    - "Evolution Markets"
+    - "Invoice"
+    - "Brokerage Statement"
+  invoice_id_patterns:
+    - "Invoice\\s*#?\\s*:?\\s*(\\S+)"
+    - "INV[-/]?(\\S+)"
+  date_patterns:
+    - "Date\\s*:?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})"
+    - "Invoice Date\\s*:?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})"
+  table_start_keywords:
+    - "Trade Date"
+    - "Trade ID"
+    - "Description"
+  table_end_keywords:
+    - "Total"
+    - "Grand Total"
+    - "Subtotal"
+
+# Column mapping: broker column name -> canonical field
+column_mappings:
+  "Trade Date": "trade_date"
+  "Trade ID": "trade_id"
+  "Trade No": "trade_id"
+  "Instrument": "instrument"
+  "Product": "instrument"
+  "Commodity": "instrument"
+  "Exchange": "exchange"
+  "Buy/Sell": "buy_sell"
+  "B/S": "buy_sell"
+  "Side": "buy_sell"
+  "Quantity": "quantity"
+  "Qty": "quantity"
+  "Volume": "quantity"
+  "Lots": "quantity"
+  "Unit": "unit"
+  "Price": "price"
+  "Rate": "price"
+  "Delivery Start": "delivery_start"
+  "Start Date": "delivery_start"
+  "Delivery End": "delivery_end"
+  "End Date": "delivery_end"
+  "Counterparty": "counterparty"
+  "CP": "counterparty"
+  "Brokerage Rate": "brokerage_rate"
+  "Brok Rate": "brokerage_rate"
+  "Brokerage": "brokerage_amount"
+  "Brokerage Amount": "brokerage_amount"
+  "Commission": "brokerage_amount"
+  "Currency": "currency"
+  "Ccy": "currency"
+
+# Regex rules for value cleaning
+value_rules:
+  buy_sell:
+    "B|Buy|BUY|BOUGHT": "BUY"
+    "S|Sell|SELL|SOLD": "SELL"
+  currency:
+    default: "USD"

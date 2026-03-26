@@ -1,0 +1,65 @@
+# TFS Energy - Broker Template Definition
+broker_name: "TFS Energy"
+aliases:
+  - "TFS ENERGY"
+  - "TFS"
+  - "Tradition Financial Services"
+  - "TFS Energy LLC"
+
+pdf:
+  header_patterns:
+    - "TFS ENERGY"
+    - "TFS Energy"
+    - "Tradition"
+  invoice_id_patterns:
+    - "Invoice\\s*#?\\s*:?\\s*(\\S+)"
+    - "Ref\\s*:?\\s*(\\S+)"
+  date_patterns:
+    - "Date\\s*:?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})"
+  table_start_keywords:
+    - "Trade Date"
+    - "Deal Date"
+    - "Transaction"
+  table_end_keywords:
+    - "Total"
+    - "Net Amount"
+
+column_mappings:
+  "Trade Date": "trade_date"
+  "Deal Date": "trade_date"
+  "Deal No": "trade_id"
+  "Trade ID": "trade_id"
+  "Reference": "trade_id"
+  "Product": "instrument"
+  "Instrument": "instrument"
+  "Description": "instrument"
+  "Market": "exchange"
+  "Exchange": "exchange"
+  "Buy/Sell": "buy_sell"
+  "Direction": "buy_sell"
+  "B/S": "buy_sell"
+  "Quantity": "quantity"
+  "Volume": "quantity"
+  "Lots": "quantity"
+  "Unit": "unit"
+  "Price": "price"
+  "Deal Price": "price"
+  "Delivery From": "delivery_start"
+  "Delivery To": "delivery_end"
+  "Period Start": "delivery_start"
+  "Period End": "delivery_end"
+  "Counterparty": "counterparty"
+  "Client": "counterparty"
+  "Brokerage": "brokerage_amount"
+  "Commission": "brokerage_amount"
+  "Fee": "brokerage_amount"
+  "Brokerage Rate": "brokerage_rate"
+  "Currency": "currency"
+  "Ccy": "currency"
+
+value_rules:
+  buy_sell:
+    "B|Buy|BUY|BOUGHT": "BUY"
+    "S|Sell|SELL|SOLD": "SELL"
+  currency:
+    default: "USD"

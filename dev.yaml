@@ -1,0 +1,126 @@
+# ============================================================================
+# Brokerage Reconciliation System — Configuration
+# ============================================================================
+
+app:
+  name: "Brokerage Reconciliation System"
+  version: "2.0.0"
+  debug: true
+  log_level: "INFO"
+
+# --- FastAPI Server ---
+server:
+  host: "0.0.0.0"
+  port: 8001
+  reload: true
+
+# --- Streamlit UI ---
+ui:
+  api_base_url: "http://localhost:8001"
+  page_title: "Brokerage Reconciliation"
+  page_icon: "📊"
+  layout: "wide"
+
+# --- LLM Configuration ---
+llm:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  api_key: ${ANTHROPIC_API_KEY}
+  max_tokens: 4096
+  temperature: 0.0
+  retry_attempts: 3
+  retry_delay: 2
+
+# --- Storage ---
+storage:
+  base_path: "data"
+  raw_files: "data/raw_files"
+  parsed_files: "data/parsed_files"
+  normalized_output: "data/normalized_output"
+  logs: "logs"
+
+# --- Database ---
+database:
+  url: "sqlite:///data/reconciliation.db"
+  echo: false
+
+# --- MS Receivables Data ---
+ms_data:
+  file_path: "documentation/ms_receivables_client_base_data.xlsx"  # relative to broker_recon_flow/
+  index_columns:
+    - "trade_id"
+    - "trade_date"
+    - "client_account"
+
+# --- Agent Pipeline ---
+agents:
+  verification:
+    confidence_threshold: 0.75
+    max_retries: 2
+  classifier:
+    confidence_threshold: 0.80
+    use_llm_fallback: true
+  extraction:
+    use_llm_fallback: true
+    llm_confidence_threshold: 0.70
+    fuzzy_match_threshold: 0.70
+    supported_formats: ["pdf", "xlsx", "xls", "csv"]
+  reconciliation:
+    tolerance:
+      quantity: 0.001
+      price: 0.01
+      brokerage: 1.0
+    match_fields: ["quantity", "price", "brokerage_amount", "currency"]
+  template_generator:
+    output_format: "xlsx"
+    include_summary: true
+
+# --- HITL ---
+hitl:
+  enabled: true
+  checkpoints: ["extraction"]
+  auto_approve_confidence: 0.98
+
+# --- Logging ---
+logging:
+  format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  file: "logs/app.log"
+  max_bytes: 10485760
+  backup_count: 5
+
+# --- Supported Brokers (known templates) ---
+brokers:
+  - name: "BNP Paribas"
+    template: "bnp"
+    keywords: ["BNP", "BNP PARIBAS", "BNP PARIBAS SINGAPORE"]
+  - name: "Citadel Securities"
+    template: null
+    keywords: ["CITADEL", "CITADEL SECURITIES"]
+  - name: "DBS Bank"
+    template: null
+    keywords: ["DBS", "DBS BANK", "DBS AUSTRALIA"]
+  - name: "Goldman Sachs"
+    template: null
+    keywords: ["GOLDMAN", "GOLDMAN SACHS", "GS"]
+  - name: "HSBC"
+    template: null
+    keywords: ["HSBC"]
+  - name: "JP Morgan"
+    template: "jpmorgan"
+    keywords: ["JP MORGAN", "J.P. MORGAN", "JPMORGAN", "JPM", "JP MORGAN SYDNEY"]
+  - name: "Marex"
+    template: "marex"
+    keywords: ["MAREX", "MAREX FINANCIAL", "MAREX SPECTRON"]
+  - name: "Nomura"
+    template: null
+    keywords: ["NOMURA", "NOMURA SYDNEY"]
+  - name: "Evolution Markets"
+    template: "evolution"
+    keywords: ["EVOLUTION", "EVOLUTION MARKETS", "EVM"]
+  - name: "TFS Energy"
+    template: "tfs"
+    keywords: ["TFS", "TFS ENERGY", "TRADITION FINANCIAL"]
+  - name: "ICAP / TP ICAP"
+    template: "icap"
+    keywords: ["ICAP", "TP ICAP", "TULLETT PREBON"]
