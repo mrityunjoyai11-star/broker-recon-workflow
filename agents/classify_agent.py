@@ -40,12 +40,13 @@ def run_classification(
     excel_path: str | None = None,
     broker_hint: str | None = None,
     db_session=None,
+    flow_type: str = "receivable",
 ) -> ClassificationResult:
-    logger.info("Classifying: PDF=%s, Excel=%s, hint=%s", pdf_path, excel_path, broker_hint)
+    logger.info("Classifying: PDF=%s, Excel=%s, hint=%s, flow=%s", pdf_path, excel_path, broker_hint, flow_type)
 
     cfg = get_agent_config("classifier")
     broker_configs = get_broker_configs()
-    available_templates = list_available_templates()
+    available_templates = list_available_templates(flow_type=flow_type)
 
     # Tier 1: broker hint direct match
     if broker_hint:
@@ -93,7 +94,7 @@ def run_classification(
         or broker_hint
     )
     if db_session and broker_for_cache:
-        cached = _check_template_cache(db_session, broker_for_cache)
+        cached = _check_template_cache(db_session, broker_for_cache, flow_type=flow_type)
         if cached:
             logger.info("TemplateCache hit for broker: %s", broker_for_cache)
             return ClassificationResult(
@@ -164,8 +165,8 @@ def _keywords_to_classification(
     return ClassificationResult(template_type=None, confidence=0.0, detected_keywords=keywords, method="rule_based")
 
 
-def _check_template_cache(db_session, broker_name: str) -> dict | None:
-    """Check TemplateCache DB for a HITL-approved mapping for this broker."""
+def _check_template_cache(db_session, broker_name: str, flow_type: str = "receivable") -> dict | None:
+    """Check TemplateCache DB for a HITL-approved mapping for this broker + flow type."""
     try:
         from broker_recon_flow.db.models import TemplateCache
         row = (
@@ -173,6 +174,7 @@ def _check_template_cache(db_session, broker_name: str) -> dict | None:
             .filter(
                 TemplateCache.broker_name.ilike(f"%{broker_name}%"),
                 TemplateCache.hitl_approved == True,  # noqa: E712
+                TemplateCache.flow_type == flow_type,
             )
             .order_by(TemplateCache.use_count.desc())
             .first()

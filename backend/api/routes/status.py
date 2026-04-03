@@ -141,9 +141,12 @@ def get_session_results(session_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/ms-data/preview")
-def ms_data_preview(limit: int = Query(default=50, ge=1, le=500)):
-    """Return a sample of the loaded MS receivables data."""
-    df = load_ms_data()
+def ms_data_preview(
+    limit: int = Query(default=50, ge=1, le=500),
+    flow_type: str = Query(default="receivable"),
+):
+    """Return a sample of the loaded MS data for the given flow type."""
+    df = load_ms_data(flow_type=flow_type)
     if df.empty:
         return JSONResponse({"rows": [], "columns": [], "total": 0})
     sample = df.head(limit)

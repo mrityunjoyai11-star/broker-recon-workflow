@@ -1,5 +1,7 @@
 # Marex - Broker Template Definition
 broker_name: "Marex"
+flow_types:
+  - receivable
 aliases:
   - "Marex"
   - "MAREX"

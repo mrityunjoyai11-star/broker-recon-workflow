@@ -23,6 +23,7 @@ from broker_recon_flow.utils.logger import get_logger
 logger = get_logger(__name__)
 
 BROKER_COLS = [
+    "invoice_id", "invoice_date",
     "trade_id", "trade_date", "instrument", "exchange", "buy_sell",
     "quantity", "unit", "price", "delivery_start", "delivery_end",
     "counterparty", "client_account", "brokerage_rate", "brokerage_amount",
@@ -34,6 +35,10 @@ MS_COLS = [
     "quantity", "price", "client_account", "brokerage_amount",
     "commission_rate", "currency", "broker_code",
 ]
+
+# Fields that appear in the reconciliation differences dict and get their own
+# named diff columns in the Mismatches sheet (broker value / MS value / delta).
+_DIFF_FIELDS = ["quantity", "price", "brokerage_amount", "currency", "buy_sell"]
 
 
 def run_template_generation(
@@ -160,8 +165,22 @@ def _reconciliation_matches_df(matches: list[ReconciliationMatch], status: str) 
         if m.ms_trade:
             for c in MS_COLS:
                 row[f"ms_{c}"] = getattr(m.ms_trade, c, None)
+        # Expand differences dict into named columns so reviewers can see
+        # broker value vs MS value vs numeric delta without parsing JSON.
         if m.differences:
-            row["differences"] = str(m.differences)
+            for field in _DIFF_FIELDS:
+                if field in m.differences:
+                    d = m.differences[field]
+                    row[f"diff_{field}_broker"] = d.get("broker")
+                    row[f"diff_{field}_ms"] = d.get("ms")
+                    if "diff" in d:       # numeric delta present
+                        row[f"diff_{field}_delta"] = d["diff"]
+                    elif "reason" in d:
+                        row[f"diff_{field}_delta"] = d["reason"]
+            # Keep the raw JSON blob too for fields outside _DIFF_FIELDS
+            extra = {k: v for k, v in m.differences.items() if k not in _DIFF_FIELDS}
+            if extra:
+                row["other_differences"] = str(extra)
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=["status"])
@@ -183,3 +202,75 @@ def _exceptions_df(new_trades: list[ReconciliationMatch], missing_trades: list[R
                 row[f"ms_{c}"] = getattr(m.ms_trade, c, None)
         rows.append(row)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["exception_type"])
+
+
+# ── Parsed Trades Excel (saved on HITL approval) ───────────────────────────
+
+def save_parsed_trades_excel(
+    extraction: ExtractionResult,
+    broker_name: str | None = None,
+) -> tuple[bytes, str]:
+    """Build a clean Excel of the HITL-approved extracted trades and return
+    (bytes, filename).  Saved to data/parsed_files/ by the persist node.
+
+    Sheets:
+      1. Trades        — one row per extracted trade (all canonical fields)
+      2. Warnings      — extraction warnings / quality notes
+      3. Summary       — counts, method, confidence
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_broker = (broker_name or "unknown").replace(" ", "_")
+    filename = f"parsed_trades_{safe_broker}_{timestamp}.xlsx"
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        hdr = wb.add_format({"bold": True, "bg_color": "#2c5f8a", "font_color": "white", "border": 1})
+        num = wb.add_format({"border": 1, "num_format": "#,##0.00"})
+        cell = wb.add_format({"border": 1})
+        title_fmt = wb.add_format({"bold": True, "font_size": 13, "font_color": "#2c5f8a"})
+
+        # Sheet 1: All trades
+        trades_df = _trades_df(extraction.trades)
+        # Add duplicate trade_id flag so reviewer can spot them easily
+        if not trades_df.empty:
+            id_counts = trades_df["trade_id"].value_counts()
+            trades_df["duplicate_trade_id"] = trades_df["trade_id"].map(
+                lambda x: "YES" if id_counts.get(x, 0) > 1 else ""
+            )
+        trades_df.to_excel(writer, sheet_name="Trades", startrow=2, index=False)
+        ws = writer.sheets["Trades"]
+        ws.write(0, 0, f"Parsed Trades — {broker_name or 'Unknown'} ({len(trades_df)} records)", title_fmt)
+        _fmt_headers(ws, trades_df, hdr, 2)
+        for ci, col in enumerate(trades_df.columns):
+            max_w = max(len(str(col)), trades_df[col].astype(str).str.len().max() if not trades_df.empty else 0)
+            ws.set_column(ci, ci, min(max_w + 4, 40))
+
+        # Sheet 2: Warnings
+        warn_df = pd.DataFrame({"warning": extraction.warnings or ["No warnings"]})
+        warn_df.to_excel(writer, sheet_name="Warnings", startrow=2, index=False)
+        ws2 = writer.sheets["Warnings"]
+        ws2.write(0, 0, "Extraction Warnings", title_fmt)
+        _fmt_headers(ws2, warn_df, hdr, 2)
+        ws2.set_column(0, 0, 80)
+
+        # Sheet 3: Summary
+        summary_rows = [
+            ["Broker", broker_name or "Unknown"],
+            ["Timestamp", timestamp],
+            ["Extraction Method", extraction.extraction_method],
+            ["Confidence", f"{extraction.confidence:.1%}"],
+            ["Total Trades", extraction.trade_count],
+            ["Duplicate Trade IDs", int((trades_df["duplicate_trade_id"] == "YES").sum()) if not trades_df.empty and "duplicate_trade_id" in trades_df.columns else 0],
+            ["Warnings", len(extraction.warnings or [])],
+        ]
+        summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
+        summary_df.to_excel(writer, sheet_name="Summary", startrow=2, index=False)
+        ws3 = writer.sheets["Summary"]
+        ws3.write(0, 0, "Extraction Summary", title_fmt)
+        _fmt_headers(ws3, summary_df, hdr, 2)
+        ws3.set_column(0, 0, 30)
+        ws3.set_column(1, 1, 25)
+
+    logger.info("Parsed trades Excel: %s (%d trades)", filename, len(extraction.trades))
+    return buf.getvalue(), filename

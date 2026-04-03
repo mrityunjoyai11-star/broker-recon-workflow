@@ -294,67 +294,7 @@ def page_review():
 
     # ── SIPDO Optimization Progress ──────────────────────────────────────
     if status == "optimizing":
-        st.info("🎯 **SIPDO Prompt Optimization in progress…**")
-        st.markdown(f"Generating an optimized extraction prompt for **{state.get('broker_name', 'Unknown')}**")
-
-        # Parse SIPDO steps from logs to show a live step checklist
-        logs = state.get("logs", [])
-        sipdo_logs = [l for l in logs if "SIPDO" in l or "sipdo" in l.lower()]
-
-        # Define the SIPDO pipeline stages and check which are done
-        sipdo_stages = [
-            ("Step 1", "Analyzing document structure"),
-            ("Step 2", "Decomposing extraction fields"),
-            ("Step 3", "Generating seed extraction prompt"),
-            ("Step 4", "Optimization iterations"),
-            ("Step 5", "Consistency audit"),
-        ]
-
-        completed_steps = 0
-        for key, label in sipdo_stages:
-            found = any(key in l for l in sipdo_logs)
-            if found:
-                completed_steps += 1
-
-        # Progress bar based on completed SIPDO stages
-        progress_pct = min(int(completed_steps / len(sipdo_stages) * 100), 95)
-        st.progress(progress_pct, text=f"SIPDO: {completed_steps}/{len(sipdo_stages)} stages complete")
-
-        # Show live stage checklist
-        st.markdown("##### Optimization Stages")
-        for key, label in sipdo_stages:
-            found = any(key in l for l in sipdo_logs)
-            if found:
-                st.markdown(f'<span class="step-done">✓ {label}</span>', unsafe_allow_html=True)
-            elif completed_steps > 0:
-                # First unfinished stage after at least one completed = active
-                st.markdown(f'<span class="step-active">⏳ {label}</span>', unsafe_allow_html=True)
-                completed_steps = -1  # mark remaining as pending
-            else:
-                st.markdown(f'<span class="step-pending">○ {label}</span>', unsafe_allow_html=True)
-
-        # Show iteration detail if available
-        iter_logs = [l for l in sipdo_logs if "iteration" in l.lower() or "accuracy" in l.lower()]
-        if iter_logs:
-            st.markdown("##### Iteration Details")
-            for log in iter_logs[-6:]:
-                st.caption(log)
-
-        # Poll for completion
-        with st.spinner("Waiting for optimization to finish…"):
-            refreshed = _poll_state(
-                state["session_id"],
-                {"hitl_review", "extracting", "completed", "failed"},
-                max_wait=10,
-            )
-        if refreshed:
-            st.session_state.pipeline_state = refreshed
-            st.rerun()
-        if st.button("🔄 Refresh"):
-            refreshed = _get(f"/api/pipeline/state/{state['session_id']}")
-            if refreshed:
-                st.session_state.pipeline_state = refreshed
-                st.rerun()
+        _render_sipdo_progress(state)
         return
 
     # If pipeline is still running, show progress with auto-refresh
@@ -456,15 +396,108 @@ def page_review():
                     st.rerun()
 
         with col_reject:
-            if st.button("❌ Reject", use_container_width=True):
-                _post(
+            if st.button("❌ Reject & Re-extract", use_container_width=True):
+                resumed = _post(
                     "/api/pipeline/resume",
                     json={"session_id": state["session_id"], "approved": False, "feedback": feedback},
                 )
-                st.warning("Rejected. You can re-upload corrected files.")
-                st.session_state.pipeline_state = None
-                st.session_state.page = "Upload"
+                if resumed:
+                    st.session_state.pipeline_state = resumed
+                    st.info("Extraction rejected. Choose a new extraction strategy below.")
+                    st.rerun()
+                else:
+                    st.warning("Failed to resume pipeline. Try re-uploading.")
+                    st.session_state.pipeline_state = None
+                    st.session_state.page = "Upload"
+                    st.rerun()
+
+
+def _render_sipdo_progress(state: dict):
+    """Show live SIPDO optimization progress by polling the side-channel."""
+    session_id = state.get("session_id", "")
+    broker = state.get("broker_name") or "Unknown"
+
+    st.info(f"🎯 **SIPDO Prompt Optimization in progress for {broker}…**")
+    st.markdown("Generating an optimized extraction prompt. This typically takes 2-5 minutes.")
+
+    sipdo_stages = [
+        ("Step 1", "Analyzing document structure"),
+        ("Step 2", "Decomposing extraction fields"),
+        ("Step 3", "Generating seed extraction prompt"),
+        ("Step 4", "Optimization iterations"),
+        ("Step 5", "Consistency audit"),
+    ]
+
+    # Container that we'll update inside the polling loop
+    progress_bar = st.empty()
+    stages_container = st.empty()
+    iter_container = st.empty()
+    status_text = st.empty()
+
+    # Poll the side-channel endpoint until done
+    max_polls = 600   # up to ~10 minutes (600 * 1s)
+    for _ in range(max_polls):
+        progress = _get(f"/api/pipeline/sipdo-progress/{session_id}")
+        if not progress:
+            time.sleep(2)
+            continue
+
+        messages = progress.get("messages", [])
+        done = progress.get("done", False)
+
+        # Parse which stages are complete
+        completed_steps = 0
+        for key, _ in sipdo_stages:
+            if any(key in m for m in messages):
+                completed_steps += 1
+
+        pct = min(int(completed_steps / len(sipdo_stages) * 100), 95) if not done else 100
+        progress_bar.progress(pct, text=f"SIPDO: {completed_steps}/{len(sipdo_stages)} stages complete")
+
+        # Build stage checklist
+        stage_lines = []
+        active_found = False
+        for key, label in sipdo_stages:
+            found = any(key in m for m in messages)
+            if found:
+                stage_lines.append(f"✅ {label}")
+            elif not active_found and completed_steps > 0:
+                stage_lines.append(f"⏳ {label}")
+                active_found = True
+            else:
+                stage_lines.append(f"⬜ {label}")
+        stages_container.markdown("##### Optimization Stages\n" + "\n\n".join(stage_lines))
+
+        # Show iteration details
+        iter_msgs = [m for m in messages if "iteration" in m.lower() or "accuracy" in m.lower()]
+        if iter_msgs:
+            detail = "##### Iteration Details\n" + "\n\n".join(f"- {m}" for m in iter_msgs[-8:])
+            iter_container.markdown(detail)
+
+        if done:
+            status_text.success("✅ Optimization complete! Loading results…")
+            time.sleep(1)
+            # Fetch the final graph state (node has returned, state is persisted)
+            refreshed = _poll_state(session_id, {"hitl_review", "extracting", "completed", "failed"}, max_wait=15)
+            if refreshed:
+                st.session_state.pipeline_state = refreshed
                 st.rerun()
+            # Fallback — try once more
+            refreshed = _get(f"/api/pipeline/state/{session_id}")
+            if refreshed:
+                st.session_state.pipeline_state = refreshed
+                st.rerun()
+            break
+
+        time.sleep(2)
+
+    # If we exhausted polling, offer manual refresh
+    st.warning("Optimization is taking longer than expected.")
+    if st.button("🔄 Refresh Status"):
+        refreshed = _get(f"/api/pipeline/state/{session_id}")
+        if refreshed:
+            st.session_state.pipeline_state = refreshed
+            st.rerun()
 
 
 def _render_sipdo_choice(state: dict):
@@ -506,12 +539,11 @@ def _render_sipdo_choice(state: dict):
             "- Future uploads from this broker will be instant"
         )
         if st.button("🎯 Optimize First", type="primary", use_container_width=True, key="sipdo_optimize"):
-            with st.spinner("Starting SIPDO optimization…"):
-                result = _post(
-                    "/api/pipeline/sipdo-choice",
-                    json={"session_id": state["session_id"], "strategy": "optimize"},
-                    timeout=600,
-                )
+            result = _post(
+                "/api/pipeline/sipdo-choice",
+                json={"session_id": state["session_id"], "strategy": "optimize"},
+                timeout=30,
+            )
             if result:
                 st.session_state.pipeline_state = result
                 st.rerun()
@@ -783,15 +815,25 @@ def _render_history_detail(session_id: str):
 
 # ── Page: MS Data ────────────────────────────────────────────────────────────
 def page_ms_data():
-    st.header("📂 MS Receivables Data")
+    st.header("📂 MS Internal Data")
+
+    # Flow type selector
+    flow_label = st.radio(
+        "Flow Type",
+        ["Receivable", "Payable"],
+        horizontal=True,
+        key="ms_data_flow_type",
+    )
+    flow_type = flow_label.lower()
 
     # Stats
-    stats = _get("/api/status/ms-data")
+    stats = _get(f"/api/status/ms-data?flow_type={flow_type}")
     if stats:
-        cols = st.columns(3)
-        cols[0].metric("Total Rows", stats.get("total_rows", 0))
-        cols[1].metric("Trade ID Index", stats.get("trade_id_count", 0))
-        cols[2].metric("Composite Index", stats.get("composite_count", 0))
+        cols = st.columns(4)
+        cols[0].metric("Flow Type", flow_type.capitalize())
+        cols[1].metric("Total Rows", stats.get("total_rows", 0))
+        cols[2].metric("Trade ID Index", stats.get("trade_id_count", 0))
+        cols[3].metric("Composite Index", stats.get("composite_count", 0))
 
         columns = stats.get("columns", [])
         if columns:
@@ -803,14 +845,14 @@ def page_ms_data():
     # Preview table
     st.subheader("Data Preview")
     limit = st.slider("Rows to show", min_value=10, max_value=200, value=50, step=10)
-    preview = _get(f"/api/status/ms-data/preview?limit={limit}")
+    preview = _get(f"/api/status/ms-data/preview?limit={limit}&flow_type={flow_type}")
     if preview and preview.get("rows"):
         df = pd.DataFrame(preview["rows"])
         st.dataframe(df, use_container_width=True, hide_index=True,
                      height=min(600, 35 * len(df) + 38))
-        st.caption(f"Showing {len(df)} of {preview.get('total', '?')} rows")
+        st.caption(f"Showing {len(df)} of {preview.get('total', '?')} {flow_type} rows")
     elif preview:
-        st.info("MS data is empty or not loaded.")
+        st.info(f"No MS {flow_type} data loaded. Check the config file path.")
 
 
 # ── Page: Prompt Cache ───────────────────────────────────────────────────────

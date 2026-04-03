@@ -39,6 +39,8 @@ def persist_results(
     hitl_approved: bool = False,
     pdf_filename: str | None = None,
     excel_filename: str | None = None,
+    flow_type: str = "receivable",
+    pdf_path_for_fingerprint: str | None = None,
 ) -> ReconciliationSession:
     """Write all pipeline results to the DB. Returns the updated session ORM object."""
     s = reconciliation.summary
@@ -51,6 +53,7 @@ def persist_results(
 
     session_row.broker_name = broker_name
     session_row.invoice_id = invoice_id
+    session_row.flow_type = flow_type
     session_row.pdf_filename = pdf_filename
     session_row.excel_filename = excel_filename
     session_row.status = "completed"
@@ -123,7 +126,11 @@ def persist_results(
 
     # ── 4. Upsert TemplateCache (only on HITL approval) ──────────────────
     if hitl_approved and column_mapping and broker_name:
-        _upsert_template_cache(db, broker_name, column_mapping, extraction.extraction_method)
+        _upsert_template_cache(
+            db, broker_name, column_mapping, extraction.extraction_method,
+            flow_type=flow_type,
+            pdf_path=pdf_path_for_fingerprint,
+        )
 
     db.commit()
     logger.info("Persisted session %s: %d trades, %d recon rows", session_id, extraction.trade_count,
@@ -132,25 +139,48 @@ def persist_results(
     return session_row
 
 
-def _upsert_template_cache(db: Session, broker_name: str, column_mapping: dict, method: str | None) -> None:
-    existing = (
-        db.query(TemplateCache)
-        .filter(TemplateCache.broker_name.ilike(f"%{broker_name}%"))
-        .first()
-    )
+def _upsert_template_cache(
+    db: Session, broker_name: str, column_mapping: dict, method: str | None,
+    flow_type: str = "receivable",
+    pdf_path: str | None = None,
+) -> None:
+    from broker_recon_flow.services.prompt_cache import compute_pdf_fingerprint
+    fp = compute_pdf_fingerprint(pdf_path) if pdf_path else None
+
+    existing = None
+    if fp:
+        from broker_recon_flow.db.models import TemplateCache as TC
+        existing = (
+            db.query(TC)
+            .filter(TC.pdf_fingerprint == fp, TC.flow_type == flow_type)
+            .first()
+        )
+    if existing is None:
+        existing = (
+            db.query(TemplateCache)
+            .filter(
+                TemplateCache.broker_name.ilike(f"%{broker_name}%"),
+                TemplateCache.flow_type == flow_type,
+            )
+            .first()
+        )
     if existing:
         existing.column_mapping = column_mapping
         existing.extraction_method = method
         existing.hitl_approved = True
         existing.use_count += 1
+        if fp:
+            existing.pdf_fingerprint = fp
         existing.updated_at = datetime.utcnow()
-        logger.info("Updated TemplateCache for broker: %s", broker_name)
+        logger.info("Updated TemplateCache for broker: %s (%s)", broker_name, flow_type)
     else:
         db.add(TemplateCache(
             broker_name=broker_name,
+            flow_type=flow_type,
+            pdf_fingerprint=fp,
             column_mapping=column_mapping,
             extraction_method=method,
             hitl_approved=True,
             use_count=1,
         ))
-        logger.info("Created TemplateCache for broker: %s", broker_name)
+        logger.info("Created TemplateCache for broker: %s (%s)", broker_name, flow_type)

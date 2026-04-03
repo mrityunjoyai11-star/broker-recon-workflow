@@ -21,7 +21,17 @@ determine if they belong to the SAME brokerage invoice/trade set.
 
 Compare: broker name, invoice number, date/period, currency, approximate totals, counterparty.
 
-Return ONLY a JSON object:
+You must return ONLY valid JSON object.
+
+Rules:
+- No markdown
+- No explanations
+- No trailing commas
+- All strings must be closed
+- Output must be parseable by json.loads()
+- If you cannot complete, return: {"error": "incomplete"}
+
+Schema:
 {
   "doc_match": true/false,
   "confidence": 0.0-1.0,
@@ -29,7 +39,11 @@ Return ONLY a JSON object:
   "invoice_id": "invoice id or null",
   "mismatches": ["list of specific mismatches"],
   "message": "brief explanation"
-}"""
+}
+
+IMPORTANT: Do not truncate output. Ensure the JSON is complete.
+
+"""
 
 
 def run_verification(pdf_path: str, excel_path: str) -> VerificationResult:

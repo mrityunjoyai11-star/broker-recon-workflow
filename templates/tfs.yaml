@@ -1,5 +1,7 @@
 # TFS Energy - Broker Template Definition
 broker_name: "TFS Energy"
+flow_types:
+  - receivable
 aliases:
   - "TFS ENERGY"
   - "TFS"

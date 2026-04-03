@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from broker_recon_flow.graph.workflow import get_graph
 from broker_recon_flow.graph.state import GraphState
+from broker_recon_flow.services.sipdo_progress import get_progress
 from broker_recon_flow.utils.logger import get_logger
 
 router = APIRouter()
@@ -173,7 +176,9 @@ async def sipdo_choice(req: SipdoChoiceRequest):
     """
     Inject SIPDO strategy choice then resume: sipdo_choice_gate →
     either sipdo_optimize → extract or extract directly.
-    Runs until the next interrupt (hitl_gate).
+
+    For "optimize" strategy, runs the graph stream in a background thread
+    so the UI can poll progress via /sipdo-progress/{session_id}.
     """
     if req.strategy not in ("quick", "optimize"):
         raise HTTPException(status_code=400, detail="strategy must be 'quick' or 'optimize'")
@@ -195,7 +200,27 @@ async def sipdo_choice(req: SipdoChoiceRequest):
             },
         )
 
-        # Stream until next interrupt (hitl_gate)
+        if req.strategy == "optimize":
+            # Run graph asynchronously so the UI can poll progress
+            def _run_graph_stream():
+                try:
+                    for event in graph.stream(None, config=config):
+                        pass
+                except Exception:
+                    logger.exception("SIPDO optimize background stream error: session=%s", req.session_id)
+
+            thread = threading.Thread(target=_run_graph_stream, daemon=True)
+            thread.start()
+
+            # Return immediately with "optimizing" status
+            return JSONResponse({
+                "session_id": req.session_id,
+                "status": "optimizing",
+                "current_step": "sipdo_optimize",
+                "logs": [],
+            })
+
+        # "quick" strategy — run synchronously as before
         for event in graph.stream(None, config=config):
             pass
 
@@ -219,3 +244,9 @@ async def get_pipeline_state(session_id: str):
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     state = GraphState(**current.values)
     return JSONResponse(_serialise_state(state))
+
+
+@router.get("/sipdo-progress/{session_id}")
+async def sipdo_progress(session_id: str):
+    """Return live SIPDO optimization progress from the in-memory side-channel."""
+    return JSONResponse(get_progress(session_id))

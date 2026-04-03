@@ -97,6 +97,8 @@ class TemplateCache(Base):
 
     id = Column(String, primary_key=True, default=_uuid)
     broker_name = Column(String, nullable=False, index=True)
+    flow_type = Column(String, default="receivable")    # receivable | payable
+    pdf_fingerprint = Column(String, nullable=True, index=True)  # SHA256 of first-3-page structure
     column_mapping = Column(JSON, nullable=False)       # {raw_column: canonical_field}
     source_filename = Column(String, nullable=True)
     extraction_method = Column(String, nullable=True)   # fuzzy_match | llm_assisted
@@ -107,11 +109,13 @@ class TemplateCache(Base):
 
 
 class OptimizedPromptCache(Base):
-    """SIPDO-optimized extraction prompts cached per broker."""
+    """SIPDO-optimized extraction prompts cached per broker + flow type."""
     __tablename__ = "optimized_prompt_cache"
 
     id = Column(String, primary_key=True, default=_uuid)
-    broker_name = Column(String, nullable=False, unique=True, index=True)
+    broker_name = Column(String, nullable=False, index=True)
+    flow_type = Column(String, default="receivable")    # receivable | payable
+    pdf_fingerprint = Column(String, nullable=True, index=True)  # SHA256 of first-3-page structure
     prompt_text = Column(Text, nullable=False)
     accuracy_score = Column(Float, default=0.0)
     optimization_trace = Column(JSON, nullable=True)    # list of iteration dicts

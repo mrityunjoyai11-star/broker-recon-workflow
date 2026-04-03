@@ -61,7 +61,7 @@ class GraphState(BaseModel):
     # ── Persist ──────────────────────────────────────────────────────────
     db_session_id: Optional[str] = None      # same as session_id, stored on persist
     results_persisted: bool = False
-
+    parsed_file_path: Optional[str] = None   # path to saved parsed-trades Excel
     # ── MS data ──────────────────────────────────────────────────────────
     ms_data_loaded: bool = False
 

@@ -1,5 +1,7 @@
 # Evolution Markets - Broker Template Definition
 broker_name: "Evolution Markets"
+flow_types:
+  - receivable
 aliases:
   - "Evolution Markets"
   - "EVOLUTION"

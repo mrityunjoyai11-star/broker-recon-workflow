@@ -59,6 +59,7 @@ def classify_node(state: GraphState) -> dict:
             excel_path=state.excel_path,
             broker_hint=state.broker_hint or state.broker_name,
             db_session=db,
+            flow_type=state.flow_type,
         )
         updates["classification"] = result
         if result.broker_name_detected:
@@ -68,7 +69,7 @@ def classify_node(state: GraphState) -> dict:
 
         # If cached_template strategy, load the mapping from DB
         if result.parser_strategy == "cached_template" and result.broker_name_detected:
-            mapping = classify_agent._check_template_cache(db, result.broker_name_detected)
+            mapping = classify_agent._check_template_cache(db, result.broker_name_detected, flow_type=state.flow_type)
             if mapping:
                 updates["cached_column_mapping"] = mapping
 
@@ -81,7 +82,11 @@ def classify_node(state: GraphState) -> dict:
             try:
                 from broker_recon_flow.services.prompt_cache import get_cached_prompt
                 broker = result.broker_name_detected or state.broker_name
-                if broker and get_cached_prompt(broker):
+                if broker and get_cached_prompt(
+                    broker,
+                    flow_type=state.flow_type,
+                    pdf_path=state.pdf_path,
+                ):
                     has_sipdo = True
             except Exception:
                 pass
@@ -235,7 +240,27 @@ def persist_node(state: GraphState) -> dict:
             hitl_approved=state.hitl_approved,
             pdf_filename=state.pdf_path,
             excel_filename=state.excel_path,
+            flow_type=state.flow_type,
+            pdf_path_for_fingerprint=state.pdf_path,
         )
+
+        # Save parsed trades Excel to data/parsed_files/ on HITL approval
+        if state.hitl_approved and state.extraction and state.extraction.trades:
+            try:
+                from broker_recon_flow.agents.template_agent import save_parsed_trades_excel
+                from broker_recon_flow.services.storage_service import get_storage_path
+                parsed_bytes, parsed_name = save_parsed_trades_excel(
+                    state.extraction, state.broker_name,
+                )
+                parsed_path = get_storage_path("parsed_files") / parsed_name
+                parsed_path.write_bytes(parsed_bytes)
+                updates["parsed_file_path"] = str(parsed_path)
+                logger.info("Saved parsed trades Excel: %s", parsed_path)
+                updates["logs"] = updates.get("logs", state.logs) + [
+                    f"Parsed trades saved: {parsed_name} ({len(state.extraction.trades)} rows)"
+                ]
+            except Exception as exc:
+                logger.warning("Could not save parsed trades Excel: %s", exc)
         updates["results_persisted"] = True
         updates["db_session_id"] = state.session_id
         updates["status"] = PipelineStatus.COMPLETED.value
@@ -279,11 +304,13 @@ def sipdo_optimize_node(state: GraphState) -> dict:
 
     try:
         from broker_recon_flow.services.prompt_optimizer import run_optimization
+        from broker_recon_flow.services.sipdo_progress import update_progress, mark_done
 
         logs_so_far = list(state.logs)
 
         def progress_cb(msg: str):
             logs_so_far.append(msg)
+            update_progress(state.session_id, msg)
 
         result = run_optimization(
             broker_name=state.broker_name or "unknown",
@@ -307,10 +334,13 @@ def sipdo_optimize_node(state: GraphState) -> dict:
             accuracy_score=result.get("accuracy_score", 0.0),
             optimization_trace=result.get("trace", []),
             source_session_id=state.session_id,
+            flow_type=state.flow_type,
         )
+        mark_done(state.session_id)
     except Exception as exc:
         logger.exception("sipdo_optimize error")
         updates["logs"] = state.logs + [f"SIPDO optimization failed: {exc} — falling back to generic LLM"]
+        mark_done(state.session_id)
         # Don't set error/FAILED — fall through to generic extraction
 
     return updates
@@ -328,6 +358,7 @@ def _sipdo_background_worker(
     pdf_path: str | None,
     excel_path: str | None,
     approved_trades: list[dict] | None,
+    flow_type: str = "receivable",
 ) -> None:
     """Run SIPDO optimization in a background thread (fire-and-forget)."""
     try:
@@ -347,6 +378,7 @@ def _sipdo_background_worker(
             accuracy_score=result.get("accuracy_score", 0.0),
             optimization_trace=result.get("trace", []),
             source_session_id=session_id,
+            flow_type=flow_type,
         )
         logger.info(
             "[sipdo_bg_thread:%s] Done — cached prompt for '%s' (accuracy=%s)",
@@ -373,6 +405,7 @@ def sipdo_background_node(state: GraphState) -> dict:
             state.pdf_path,
             state.excel_path,
             approved_trades,
+            state.flow_type,
         ),
         daemon=True,
         name=f"sipdo-bg-{state.session_id[:8]}",
@@ -420,8 +453,41 @@ def route_after_sipdo_optimize(state: GraphState) -> str:
 def route_after_hitl(state: GraphState) -> str:
     """After HITL gate resumes: check if approved."""
     if not state.hitl_approved:
-        return "end"
+        return "re_extract_gate"
     return "reconcile"
+
+
+# ── Node: Re-Extract Gate ────────────────────────────────────────────────────
+# After HITL rejection: reset extraction state so the user can choose a new
+# extraction strategy (Quick / SIPDO) and try again.
+
+def re_extract_gate_node(state: GraphState) -> dict:
+    logger.info("[re_extract_gate] session=%s — user rejected extraction, offering re-extract", state.session_id)
+    return {
+        "status": PipelineStatus.SIPDO_CHOICE.value,
+        "current_step": "re_extract_gate",
+        # Reset extraction-related state
+        "template_type": None,
+        "cached_column_mapping": None,
+        "extraction": None,
+        "last_column_mapping": None,
+        "sipdo_optimized_prompt": None,
+        "sipdo_strategy": None,
+        "sipdo_optimization_trace": None,
+        "is_unknown_broker": True,
+        "sipdo_choice_pending": True,
+        "hitl_pending": False,
+        "hitl_approved": False,
+        "hitl_feedback": None,
+        "logs": state.logs + [
+            f"HITL rejected — choose a new extraction strategy for '{state.broker_name}'"
+        ],
+    }
+
+
+def route_after_re_extract_gate(state: GraphState) -> str:
+    """Always go to sipdo_choice_gate so user can pick a new strategy."""
+    return "sipdo_choice_gate"
 
 
 def route_after_persist(state: GraphState) -> str:

@@ -1,10 +1,12 @@
 """LangGraph StateGraph for the brokerage reconciliation pipeline.
 
-Topology (with SIPDO prompt optimization):
+Topology (with SIPDO prompt optimization + HITL re-extract loop):
   verify → classify → [conditional] →
-    ├─ known broker: extract → [interrupt] hitl_gate → reconcile → generate → persist → END
+    ├─ known broker: extract → [interrupt] hitl_gate →
+    │      ├─ approved → reconcile → generate → persist → END
+    │      └─ rejected → re_extract_gate → [interrupt] sipdo_choice_gate → ...
     └─ unknown broker: [interrupt] sipdo_choice_gate →
-         ├─ "optimize": sipdo_optimize → extract → [interrupt] hitl_gate → ... → persist → END
+         ├─ "optimize": sipdo_optimize → extract → [interrupt] hitl_gate → ...
          └─ "quick": extract → [interrupt] hitl_gate → ... → persist → sipdo_background → END
 
 HITL pause via interrupt_before=["hitl_gate"].
@@ -22,6 +24,7 @@ from broker_recon_flow.graph.nodes import (
     classify_node,
     extract_node,
     hitl_gate_node,
+    re_extract_gate_node,
     reconcile_node,
     generate_node,
     persist_node,
@@ -34,6 +37,7 @@ from broker_recon_flow.graph.nodes import (
     route_after_sipdo_optimize,
     route_after_extract,
     route_after_hitl,
+    route_after_re_extract_gate,
     route_after_persist,
 )
 from broker_recon_flow.utils.logger import get_logger
@@ -56,6 +60,7 @@ def build_workflow():
     builder.add_node("sipdo_optimize", sipdo_optimize_node)
     builder.add_node("extract", extract_node)
     builder.add_node("hitl_gate", hitl_gate_node)
+    builder.add_node("re_extract_gate", re_extract_gate_node)
     builder.add_node("reconcile", reconcile_node)
     builder.add_node("generate", generate_node)
     builder.add_node("persist", persist_node)
@@ -96,7 +101,13 @@ def build_workflow():
     builder.add_conditional_edges(
         "hitl_gate",
         route_after_hitl,
-        {"reconcile": "reconcile", "end": END},
+        {"reconcile": "reconcile", "re_extract_gate": "re_extract_gate"},
+    )
+    # re_extract_gate → sipdo_choice_gate (user picks new extraction strategy)
+    builder.add_conditional_edges(
+        "re_extract_gate",
+        route_after_re_extract_gate,
+        {"sipdo_choice_gate": "sipdo_choice_gate"},
     )
     builder.add_edge("reconcile", "generate")
     builder.add_edge("generate", "persist")
@@ -113,7 +124,7 @@ def build_workflow():
         checkpointer=checkpointer,
         interrupt_before=["sipdo_choice_gate", "hitl_gate"],
     )
-    logger.info("LangGraph workflow compiled (10 nodes, SIPDO choice + HITL interrupts)")
+    logger.info("LangGraph workflow compiled (11 nodes, SIPDO choice + HITL interrupts, re-extract loop)")
     return compiled, checkpointer
 
 

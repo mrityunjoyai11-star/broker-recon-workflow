@@ -64,7 +64,37 @@ def get_db() -> Session:
 
 
 def init_db() -> None:
-    """Create all tables if they don't exist. Safe to call on every startup."""
+    """Create all tables if they don't exist. Safe to call on every startup.
+
+    Also runs lightweight column-addition migrations for SQLite so that new
+    nullable columns added to existing models get applied to already-created
+    databases without requiring Alembic.
+    """
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
+    _run_column_migrations(engine)
     logger.info("Database tables initialized.")
+
+
+# Columns to add if they are missing from an existing table.
+# Format: (table_name, column_name, column_ddl)
+_COLUMN_MIGRATIONS = [
+    ("template_cache",          "pdf_fingerprint", "TEXT"),
+    ("optimized_prompt_cache",  "pdf_fingerprint", "TEXT"),
+]
+
+
+def _run_column_migrations(engine) -> None:
+    """Add new nullable columns to existing SQLite tables (idempotent)."""
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for table, col, ddl in _COLUMN_MIGRATIONS:
+            try:
+                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+                existing = {r[1] for r in rows}  # column names are index 1
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+                    conn.commit()
+                    logger.info("Migration: added column %s.%s", table, col)
+            except Exception as exc:
+                logger.warning("Column migration %s.%s skipped: %s", table, col, exc)

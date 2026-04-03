@@ -27,8 +27,21 @@ def load_broker_template(template_name: str) -> dict:
     return template
 
 
-def list_available_templates() -> list[str]:
-    return [p.stem for p in TEMPLATES_DIR.glob("*.yaml") if not p.stem.startswith("_")]
+def list_available_templates(flow_type: str | None = None) -> list[str]:
+    """Return template names, optionally filtered by flow_type compatibility."""
+    templates = [p.stem for p in TEMPLATES_DIR.glob("*.yaml") if not p.stem.startswith("_")]
+    if flow_type is None:
+        return templates
+    compatible = []
+    for name in templates:
+        try:
+            tmpl = load_broker_template(name)
+            allowed = tmpl.get("flow_types")  # None/missing = any flow type
+            if allowed is None or flow_type in allowed:
+                compatible.append(name)
+        except Exception:
+            compatible.append(name)  # if we can't read it, include it
+    return compatible
 
 
 def map_columns(df: pd.DataFrame, column_mappings: dict[str, str]) -> pd.DataFrame:

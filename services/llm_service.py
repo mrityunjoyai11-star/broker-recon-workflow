@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
@@ -69,15 +70,99 @@ def invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int | None = No
 def invoke_llm_json(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
     raw = invoke_llm(system_prompt, user_prompt, max_tokens=max_tokens)
     cleaned = raw.strip()
-    if cleaned.startswith("```"):
+
+    # Strip markdown code fences — they may appear at the start or after
+    # explanatory text the LLM prepends before the JSON block.
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", cleaned, re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    elif cleaned.startswith("```"):
         first_newline = cleaned.index("\n") if "\n" in cleaned else len(cleaned)
         cleaned = cleaned[first_newline + 1 :]
         if cleaned.rstrip().endswith("```"):
             cleaned = cleaned.rstrip()
             cleaned = cleaned[: cleaned.rfind("```")]
         cleaned = cleaned.strip()
+
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        logger.error("Failed to parse LLM JSON response: %s", raw[:500])
-        return {"raw_response": raw, "parse_error": True}
+        pass
+
+    # Fallback: handle truncated fenced responses (response hit max_tokens,
+    # so the closing ``` fence is missing). Look for an opening fence and
+    # take everything after it.
+    unclosed_fence = re.search(r"```(?:json)?\s*\n(.*)", cleaned, re.DOTALL)
+    if unclosed_fence:
+        candidate = unclosed_fence.group(1).strip()
+        # Try to repair truncated JSON by closing open brackets/braces
+        repaired = _repair_truncated_json(candidate)
+        if repaired is not None:
+            return repaired
+
+    # Last resort: find the first { or [ and try to parse from there
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        idx = cleaned.find(start_char)
+        if idx >= 0:
+            candidate = cleaned[idx:]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                repaired = _repair_truncated_json(candidate)
+                if repaired is not None:
+                    return repaired
+
+    logger.error("Failed to parse LLM JSON response: %s", raw[:500])
+    return {"raw_response": raw, "parse_error": True}
+
+
+def _repair_truncated_json(text: str):
+    """Attempt to repair truncated JSON by closing open brackets/braces.
+
+    Returns the parsed object on success, or None on failure.
+    """
+    # Try as-is first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Walk the string to track open brackets/braces (outside of strings)
+    closers = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            closers.append('}' if ch == '{' else ']')
+        elif ch in ('}', ']'):
+            if closers:
+                closers.pop()
+
+    if not closers:
+        return None
+
+    # If we're inside a string, close it first
+    if in_string:
+        text += '"'
+
+    # Remove any trailing comma or partial key before closing
+    text = re.sub(r',\s*$', '', text)
+    text = re.sub(r':\s*$', ': null', text)
+    # Close all remaining open brackets/braces
+    text += ''.join(reversed(closers))
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None

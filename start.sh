@@ -33,7 +33,7 @@ start_api() {
     echo "Starting FastAPI backend..."
     uvicorn broker_recon_flow.backend.main:app \
         --host 0.0.0.0 \
-        --port 8020 \
+        --port 8021 \
         --reload \
         --app-dir "$ROOT_DIR"
 }
@@ -41,7 +41,7 @@ start_api() {
 start_ui() {
     echo "Starting Streamlit frontend..."
     streamlit run "$SCRIPT_DIR/ui/app.py" \
-        --server.port 8502 \
+        --server.port 8503 \
         --server.address 0.0.0.0 \
         --server.headless true
 }
@@ -61,9 +61,9 @@ case "$MODE" in
         UI_PID=$!
         echo ""
         echo "============================================"
-        echo "  API:  http://localhost:8020"
-        echo "  UI:   http://localhost:8502"
-        echo "  Docs: http://localhost:8020/docs"
+        echo "  API:  http://localhost:8021"
+        echo "  UI:   http://localhost:8503"
+        echo "  Docs: http://localhost:8021/docs"
         echo "============================================"
         echo "Press Ctrl+C to stop both services"
         wait $API_PID $UI_PID

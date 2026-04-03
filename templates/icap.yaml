@@ -1,5 +1,7 @@
 # ICAP / TP ICAP - Broker Template Definition
 broker_name: "ICAP / TP ICAP"
+flow_types:
+  - receivable
 aliases:
   - "ICAP"
   - "TP ICAP"
