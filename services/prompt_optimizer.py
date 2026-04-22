@@ -18,13 +18,20 @@ from typing import Any, Callable, Optional
 
 from broker_recon_flow.parsers.pdf_parser import PDFParser
 from broker_recon_flow.parsers.excel_parser import ExcelParser
-from broker_recon_flow.services.llm_service import invoke_llm, invoke_llm_json
+from broker_recon_flow.services.llm_service import (
+    invoke_llm, invoke_llm_json,
+    invoke_llm_fast, invoke_llm_json_fast,
+)
 from broker_recon_flow.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# How many SIPDO iterations to run
-MAX_ITERATIONS = 4
+# How many SIPDO iterations to run (reduced from 4 — diminishing returns beyond 3)
+MAX_ITERATIONS = 3
+# Abort early if accuracy stays below this after 2 iterations
+FAST_FAIL_THRESHOLD = 0.40
+# Stop optimizing if accuracy reaches this
+EARLY_EXIT_THRESHOLD = 0.85
 
 # Domain knowledge for brokerage extraction
 DOMAIN_KNOWLEDGE = """
@@ -200,14 +207,37 @@ def run_optimization(
     trace: list[dict] = []
 
     # ── Step 1: Extract document text / structure ────────────────────────
+    # PDF first — the extraction prompt will be used against PDF, so the
+    # optimization MUST be based on PDF content, not Excel.
     doc_text = ""
     column_names: list[str] = []
     sample_rows = ""
 
-    if excel_path:
+    if pdf_path:
         try:
-            parser = ExcelParser(excel_path)
-            df = parser.get_primary_table()
+            pdf_parser = PDFParser(pdf_path)
+            pdf_full = pdf_parser.extract_full_text()
+            tables = pdf_parser.extract_tables()
+            if tables:
+                # Concatenate all tables to get the richest view
+                import pandas as pd
+                all_dfs = [t for t in tables if len(t) >= 2]
+                if all_dfs:
+                    biggest = max(all_dfs, key=len)
+                    column_names = list(biggest.columns)
+                    sample_rows = biggest.head(15).to_string()
+                    doc_text = f"Columns: {column_names}\n\nTable data:\n{biggest.to_string()}"
+            if not doc_text and pdf_full:
+                # No usable tables — use raw text (the prompt will need to handle unstructured text)
+                doc_text = pdf_full[:12000]
+        except Exception as exc:
+            logger.warning("PDF parse for SIPDO failed: %s", exc)
+
+    # Fall back to Excel only if PDF gave nothing
+    if not doc_text and excel_path:
+        try:
+            excel_parser = ExcelParser(excel_path)
+            df = excel_parser.get_primary_table()
             if df is not None and not df.empty:
                 column_names = list(df.columns)
                 sample_rows = df.head(15).to_string()
@@ -215,34 +245,23 @@ def run_optimization(
         except Exception as exc:
             logger.warning("Excel parse for SIPDO failed: %s", exc)
 
-    if not doc_text and pdf_path:
-        try:
-            parser = PDFParser(pdf_path)
-            doc_text = parser.extract_full_text()[:12000]
-            tables = parser.extract_tables()
-            if tables:
-                column_names = list(tables[0].columns)
-                sample_rows = tables[0].head(15).to_string()
-        except Exception as exc:
-            logger.warning("PDF parse for SIPDO failed: %s", exc)
-
     if not doc_text:
         _progress("No document text extracted — cannot optimize")
         return {"optimized_prompt": "", "accuracy_score": 0.0, "iteration_count": 0, "trace": []}
 
     doc_structure = f"Broker: {broker_name}\nColumns: {column_names}\nSample:\n{sample_rows}"
 
-    # ── Step 2: Document Analysis ────────────────────────────────────────
+    # ── Step 2: Document Analysis (fast model — structural analysis) ─────
     _progress("Step 1/5: Analyzing document structure...")
-    analysis = invoke_llm_json(
+    analysis = invoke_llm_json_fast(
         DOCUMENT_ANALYST_PROMPT.format(domain_knowledge=DOMAIN_KNOWLEDGE),
         f"Broker: {broker_name}\n\n{doc_text[:8000]}",
     )
     trace.append({"step": "document_analysis", "result": analysis})
 
-    # ── Step 3: Field Decomposition ──────────────────────────────────────
+    # ── Step 3: Field Decomposition (fast model) ─────────────────────────
     _progress("Step 2/5: Decomposing extraction fields...")
-    decomposition = invoke_llm_json(
+    decomposition = invoke_llm_json_fast(
         FIELD_DECOMPOSER_PROMPT,
         f"Document analysis:\n{_safe_json(analysis)}\n\nColumns: {column_names}",
     )
@@ -270,8 +289,8 @@ def run_optimization(
         difficulty = min(iteration, 5)
         _progress(f"Step 4/5: Optimization iteration {iteration}/{MAX_ITERATIONS} (difficulty={difficulty})...")
 
-        # Generate synthetic variation
-        synthetic = invoke_llm_json(
+        # Generate synthetic variation (fast model — data gen doesn't need Sonnet)
+        synthetic = invoke_llm_json_fast(
             SYNTHETIC_DATA_GENERATOR_PROMPT.format(
                 difficulty=difficulty,
                 doc_structure=doc_structure,
@@ -295,8 +314,8 @@ def run_optimization(
         else:
             extracted_trades = extracted_raw.get("trades", [])
 
-        # Evaluate
-        evaluation = invoke_llm_json(
+        # Evaluate (fast model — comparison task)
+        evaluation = invoke_llm_json_fast(
             EVALUATOR_PROMPT.format(
                 expected=_safe_json(expected),
                 extracted=_safe_json(extracted_trades),
@@ -317,14 +336,20 @@ def run_optimization(
             best_accuracy = accuracy
             best_prompt = current_prompt
 
-        # If accuracy is already very high, skip further refinement
-        if accuracy >= 0.95:
-            _progress(f"  Iteration {iteration}: accuracy ≥95%, stopping early")
+        # Early exit: accuracy already good enough
+        if accuracy >= EARLY_EXIT_THRESHOLD:
+            _progress(f"  Iteration {iteration}: accuracy ≥{EARLY_EXIT_THRESHOLD:.0%}, stopping early")
+            break
+
+        # Fast-fail: if accuracy is still very low after 2 iterations, abort
+        # (direct LLM extraction will likely do better than a poorly-optimized prompt)
+        if iteration >= 2 and best_accuracy < FAST_FAIL_THRESHOLD:
+            _progress(f"  Iteration {iteration}: accuracy still below {FAST_FAIL_THRESHOLD:.0%} after 2 iterations, aborting SIPDO")
             break
 
         # Error analysis + prompt refinement
         if evaluation.get("errors"):
-            error_analysis = invoke_llm_json(
+            error_analysis = invoke_llm_json_fast(
                 ERROR_ANALYST_PROMPT.format(
                     current_prompt=current_prompt[:4000],
                     evaluation=_safe_json(evaluation),
@@ -345,14 +370,14 @@ def run_optimization(
                 if refined and len(refined) > 100:
                     current_prompt = refined
 
-        # Regression check on previous cases
+        # Regression check on previous cases (fast model for eval)
         if iteration > 1 and all_synthetic_cases:
             prev = all_synthetic_cases[-2] if len(all_synthetic_cases) >= 2 else all_synthetic_cases[0]
             prev_text = prev.get("synthetic_text", "")
             if prev_text:
                 regress_raw = invoke_llm_json(current_prompt, f"Broker: {broker_name}\n\n{prev_text}")
                 regress_trades = regress_raw if isinstance(regress_raw, list) else regress_raw.get("trades", [])
-                regress_eval = invoke_llm_json(
+                regress_eval = invoke_llm_json_fast(
                     EVALUATOR_PROMPT.format(
                         expected=_safe_json(prev.get("expected_trades", [])),
                         extracted=_safe_json(regress_trades),

@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 class StartRequest(BaseModel):
     session_id: str
     pdf_path: str
-    excel_path: str
+    excel_path: str | None = None
     pdf_paths: list[str] = []
     excel_paths: list[str] = []
     broker_hint: str = ""
@@ -110,7 +110,7 @@ async def start_pipeline(req: StartRequest):
         pdf_path=req.pdf_path,
         excel_path=req.excel_path,
         pdf_paths=req.pdf_paths or [req.pdf_path],
-        excel_paths=req.excel_paths or [req.excel_path],
+        excel_paths=req.excel_paths or ([req.excel_path] if req.excel_path else []),
         broker_hint=req.broker_hint or None,
     )
 

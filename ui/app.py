@@ -186,7 +186,7 @@ def _poll_state(session_id: str, target_statuses: set[str], max_wait: int = 5) -
 # ── Page: Upload ─────────────────────────────────────────────────────────────
 def page_upload():
     st.header("📤 Upload Broker Documents")
-    st.markdown("Upload matching PDF invoices and Excel confirmation files from the same broker.")
+    st.markdown("Upload PDF broker invoices. Excel confirmation files are optional — the pipeline works with PDF only.")
 
     with st.form("upload_form"):
         col_a, col_b = st.columns(2)
@@ -202,13 +202,13 @@ def page_upload():
                 "Broker name (optional hint)",
                 placeholder="e.g. BNP Paribas, JP Morgan, Marex…",
             )
-        pdf_files = st.file_uploader("PDF Statement(s)", type=["pdf"], accept_multiple_files=True)
-        excel_files = st.file_uploader("Excel Confirmation(s)", type=["xlsx", "xls", "csv"], accept_multiple_files=True)
+        pdf_files = st.file_uploader("PDF Statement(s) *", type=["pdf"], accept_multiple_files=True)
+        excel_files = st.file_uploader("Excel Confirmation(s) — optional", type=["xlsx", "xls", "csv"], accept_multiple_files=True)
         submitted = st.form_submit_button("Upload & Run Pipeline", type="primary")
 
     if submitted:
-        if not pdf_files or not excel_files:
-            st.error("Please upload at least one PDF and one Excel file.")
+        if not pdf_files:
+            st.error("Please upload at least one PDF file.")
             return
 
         # Upload files — send as multi-file
@@ -216,7 +216,7 @@ def page_upload():
             files_payload = []
             for pf in pdf_files:
                 files_payload.append(("pdf_file", (pf.name, pf.getvalue(), "application/pdf")))
-            for ef in excel_files:
+            for ef in (excel_files or []):
                 files_payload.append(("excel_file", (ef.name, ef.getvalue(),
                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")))
 
@@ -231,26 +231,28 @@ def page_upload():
 
         st.session_state.session_id = resp["session_id"]
         st.session_state.pdf_path = resp["pdf_path"]
-        st.session_state.excel_path = resp["excel_path"]
+        st.session_state.excel_path = resp.get("excel_path")
         st.success(f"Uploaded! Session `{resp['session_id'][:8]}…` ({resp.get('flow_type', 'receivable')})")
 
-        if len(pdf_files) > 1 or len(excel_files) > 1:
-            st.info(f"📎 Multi-file session: {len(pdf_files)} PDFs, {len(excel_files)} Excels")
+        n_excels = len(excel_files) if excel_files else 0
+        if len(pdf_files) > 1 or n_excels > 1:
+            st.info(f"📎 Multi-file session: {len(pdf_files)} PDFs, {n_excels} Excels")
+        elif n_excels == 0:
+            st.info("📄 PDF-only upload — Excel cross-check will be skipped")
 
         # Run Phase 1: verify → classify → extract → HITL
         progress = st.progress(0, text="Phase 1: Verifying documents…")
-        state = _post(
-            "/api/pipeline/start",
-            json={
-                "session_id": resp["session_id"],
-                "flow_type": flow_type,
-                "pdf_path": resp["pdf_path"],
-                "excel_path": resp["excel_path"],
-                "pdf_paths": resp.get("pdf_paths", [resp["pdf_path"]]),
-                "excel_paths": resp.get("excel_paths", [resp["excel_path"]]),
-                "broker_hint": broker_hint,
-            },
-        )
+        start_payload = {
+            "session_id": resp["session_id"],
+            "flow_type": flow_type,
+            "pdf_path": resp["pdf_path"],
+            "pdf_paths": resp.get("pdf_paths", [resp["pdf_path"]]),
+            "broker_hint": broker_hint,
+        }
+        if resp.get("excel_path"):
+            start_payload["excel_path"] = resp["excel_path"]
+            start_payload["excel_paths"] = resp.get("excel_paths", [resp["excel_path"]])
+        state = _post("/api/pipeline/start", json=start_payload)
         progress.progress(100, text="Phase 1 complete!")
 
         if not state:
@@ -436,7 +438,7 @@ def _render_sipdo_progress(state: dict):
 
     # Poll the side-channel endpoint until done
     max_polls = 600   # up to ~10 minutes (600 * 1s)
-    for _ in range(max_polls):
+    for poll_idx in range(max_polls):
         progress = _get(f"/api/pipeline/sipdo-progress/{session_id}")
         if not progress:
             time.sleep(2)
@@ -444,6 +446,20 @@ def _render_sipdo_progress(state: dict):
 
         messages = progress.get("messages", [])
         done = progress.get("done", False)
+
+        # Also check if the graph has already moved past SIPDO (e.g. SIPDO
+        # failed/aborted and the pipeline continued to extraction/HITL)
+        if poll_idx % 3 == 0:  # check every ~6 seconds
+            graph_state = _get(f"/api/pipeline/state/{session_id}")
+            if graph_state and graph_state.get("status") in ("hitl_review", "extracting", "completed", "failed"):
+                real_status = graph_state.get("status")
+                if "failed" in messages or any("aborting" in m.lower() for m in messages) or any("failed" in m.lower() for m in messages):
+                    status_text.warning("⚠️ SIPDO optimization could not produce a good prompt — pipeline continued with direct AI extraction.")
+                else:
+                    status_text.success("✅ Optimization complete! Loading results…")
+                time.sleep(1)
+                st.session_state.pipeline_state = graph_state
+                st.rerun()
 
         # Parse which stages are complete
         completed_steps = 0
@@ -475,7 +491,12 @@ def _render_sipdo_progress(state: dict):
             iter_container.markdown(detail)
 
         if done:
-            status_text.success("✅ Optimization complete! Loading results…")
+            # Check if SIPDO failed or produced low accuracy — inform user
+            has_failure = any("failed" in m.lower() or "aborting" in m.lower() for m in messages)
+            if has_failure:
+                status_text.warning("⚠️ SIPDO optimization could not produce a good prompt — pipeline continued with direct AI extraction.")
+            else:
+                status_text.success("✅ Optimization complete! Loading results…")
             time.sleep(1)
             # Fetch the final graph state (node has returned, state is persisted)
             refreshed = _poll_state(session_id, {"hitl_review", "extracting", "completed", "failed"}, max_wait=15)

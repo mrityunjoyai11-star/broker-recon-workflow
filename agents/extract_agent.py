@@ -273,6 +273,9 @@ def _extract_fuzzy_or_llm(
         tables = parser.extract_tables()
         combined_df = _concat_pdf_tables_by_schema(tables, broker_name)
 
+        # Track the best result from table-based tiers so Tier 5 can compare
+        _table_best: tuple[list[TradeRecord], list[str], str, dict | None] | None = None
+
         if combined_df is not None and not combined_df.empty:
             raw_cols = list(combined_df.columns)
             mapping = build_column_mapping(raw_cols, threshold=threshold)
@@ -293,8 +296,14 @@ def _extract_fuzzy_or_llm(
                     "value_rules": {"buy_sell": {r"B|Buy|BUY": "BUY", r"S|Sell|SELL": "SELL"}, "currency": {"default": "USD"}},
                 }
                 trades = dataframe_to_trades(combined_df, synthetic, file_path, source_type, broker_name, invoice_id)
-                if trades:
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
                     return trades, warnings, "fuzzy_match", mapping
+                elif trades:
+                    logger.info(
+                        "Tier 3 fuzzy produced %d trades but inadequate (combined_df=%d rows, excel_ref=%d); continuing to higher tiers",
+                        len(trades), len(combined_df), excel_row_count,
+                    )
+                    _table_best = (trades, warnings[:], "fuzzy_match", mapping)
 
             # Tier 4a: LLM column-mapping on the combined DataFrame (1 LLM call
             # on headers + 10-row sample, then apply the mapping to all ~250 rows)
@@ -303,8 +312,10 @@ def _extract_fuzzy_or_llm(
                 trades, llm_mapping = _llm_map_and_extract(
                     combined_df, file_path, source_type, broker_name, invoice_id,
                 )
-                if trades:
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
                     return trades, warnings, "llm_column_map", llm_mapping
+                elif trades and (not _table_best or len(trades) > len(_table_best[0])):
+                    _table_best = (trades, warnings[:], "llm_column_map", llm_mapping)
 
             # Tier 4b: SIPDO chunked on the combined DataFrame if a SIPDO
             # prompt is available (trades in proper tabular form, cheap chunks)
@@ -320,11 +331,13 @@ def _extract_fuzzy_or_llm(
             if sipdo:
                 logger.info("Tier 4b SIPDO chunked on combined PDF tables")
                 trades = _sipdo_chunked_extract(sipdo, combined_df, file_path, source_type, broker_name, invoice_id)
-                if trades:
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
                     return trades, warnings, "sipdo_table_extract", None
+                elif trades and (not _table_best or len(trades) > len(_table_best[0])):
+                    _table_best = (trades, warnings[:], "sipdo_table_extract", None)
 
-        # Tier 5: concurrent page-by-page LLM fallback — table concat returned
-        # nothing or all above tiers failed.  Run all pages in parallel with
+        # Tier 5: concurrent page-by-page LLM fallback — table tiers produced
+        # no results or inadequate results. Run all pages in parallel with
         # _PDF_WORKERS workers so we never block sequentially on 177 calls.
         if cfg.get("use_llm_fallback", True):
             prompt = sipdo_prompt
@@ -347,7 +360,19 @@ def _extract_fuzzy_or_llm(
             )
             trades = _llm_concurrent_pdf_extract(parser, prompt, file_path, broker_name, invoice_id)
             if trades:
+                # If we also have a table-based fallback, return whichever got more trades
+                if _table_best and len(_table_best[0]) > len(trades):
+                    logger.info(
+                        "Tier 5 produced %d trades, table fallback had %d — using table result",
+                        len(trades), len(_table_best[0]),
+                    )
+                    return _table_best
                 return trades, warnings, method, None
+
+        # Return table-based fallback if Tier 5 produced nothing
+        if _table_best and _table_best[0]:
+            logger.info("Tier 5 failed, returning table-based fallback (%d trades)", len(_table_best[0]))
+            return _table_best
 
         warnings.append("All extraction tiers exhausted with no results")
         return [], warnings, "failed", None
@@ -459,19 +484,35 @@ def _sipdo_chunked_extract(
     return all_trades
 
 
+def _is_extraction_adequate(trade_count: int, combined_df_rows: int, excel_row_count: int) -> bool:
+    """Check if extracted trade count is adequate to accept as final result.
+
+    Returns True if extraction is good enough to return immediately.
+    Returns False if we should continue trying higher tiers.
+    """
+    if trade_count == 0:
+        return False
+    # If we have an Excel reference, require at least 20% coverage and ≥ 3 trades
+    if excel_row_count > 0:
+        return trade_count >= max(3, int(0.2 * excel_row_count))
+    # No Excel reference — accept if ≥ 3 trades or ≥ 30% of available rows
+    return trade_count >= max(3, int(0.3 * combined_df_rows))
+
+
 def _concat_pdf_tables_by_schema(
     tables: list[pd.DataFrame],
     broker_name: str | None,
 ) -> pd.DataFrame | None:
     """Group pdfplumber tables by column-schema fingerprint and concat the
-    dominant group into a single combined DataFrame.
+    best group into a single combined DataFrame.
 
     Strategy:
       1. Normalise column names (strip, lower) and build a frozen tuple as the
          fingerprint.  Tables that are too small (_MIN_TABLE_ROWS) are dropped.
       2. Group tables by fingerprint.
-      3. The dominant group (most tables sharing the same schema) is very likely
-         the trade/detail table repeated once per page.
+      3. Score each group by canonical field coverage (fuzzy match) × row count.
+         The group whose columns best match canonical trade fields is selected,
+         not just the group with the most tables.
       4. Concat that group → one DataFrame with all trade rows.
 
     Returns None if no usable tables are found.
@@ -493,8 +534,29 @@ def _concat_pdf_tables_by_schema(
         logger.warning("No usable pdfplumber tables found (all below %d rows)", _MIN_TABLE_ROWS)
         return None
 
-    # Pick the group with the most tables (most pages contributing trade rows)
-    dominant_schema, dominant_group = max(groups.items(), key=lambda kv: len(kv[1]))
+    # Score each group: canonical field coverage is primary, row count is tiebreaker.
+    # This ensures we pick the table with trade data, not just the most-repeated table.
+    best_schema = None
+    best_group = None
+    best_score = -1.0
+
+    for schema, group in groups.items():
+        col_names = [str(c) for c in schema]
+        mapping = build_column_mapping(col_names)
+        canonical_coverage = len(mapping) / max(len(col_names), 1)
+        total_rows = sum(len(df) for df in group)
+        # Primary: canonical coverage (0-1), secondary: row count (scaled down)
+        score = canonical_coverage * 100.0 + total_rows * 0.01
+        logger.debug(
+            "Table group schema=%d cols, %d tables, %d rows, canonical_coverage=%.0f%%, score=%.2f",
+            len(schema), len(group), total_rows, canonical_coverage * 100, score,
+        )
+        if score > best_score:
+            best_score = score
+            best_schema = schema
+            best_group = group
+
+    dominant_schema, dominant_group = best_schema, best_group
     n_schemas = len(groups)
     n_tables = len(dominant_group)
     logger.info(

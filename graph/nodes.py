@@ -26,8 +26,34 @@ def verify_node(state: GraphState) -> dict:
     logger.info("[verify_node] session=%s", state.session_id)
     updates: dict = {"status": PipelineStatus.VERIFYING.value, "current_step": "verify"}
 
-    if not state.pdf_path or not state.excel_path:
-        return {**updates, "error": "Both PDF and Excel paths are required", "status": PipelineStatus.FAILED.value}
+    if not state.pdf_path:
+        return {**updates, "error": "PDF path is required", "status": PipelineStatus.FAILED.value}
+
+    # PDF-only mode: skip cross-document verification, just extract PDF metadata
+    if not state.excel_path:
+        logger.info("[verify_node] PDF-only mode — skipping cross-doc verification")
+        from broker_recon_flow.schemas.canonical_trade import VerificationResult
+        try:
+            from broker_recon_flow.parsers.pdf_parser import PDFParser
+            pdf_meta = PDFParser(state.pdf_path).extract_metadata()
+            result = VerificationResult(
+                doc_match=True,
+                confidence=1.0,
+                mismatches=[],
+                message="PDF-only upload — cross-document verification skipped",
+                broker_detected=None,
+                invoice_id=pdf_meta.get("invoice_id"),
+            )
+            updates["verification"] = result
+            if result.broker_detected:
+                updates["broker_name"] = result.broker_detected
+            log = f"Verify: PDF-only mode, invoice_id={result.invoice_id}"
+            updates["logs"] = state.logs + [log]
+        except Exception as exc:
+            logger.exception("verify_node PDF-only error")
+            updates["error"] = str(exc)
+            updates["status"] = PipelineStatus.FAILED.value
+        return updates
 
     try:
         result = verify_agent.run_verification(state.pdf_path, state.excel_path)

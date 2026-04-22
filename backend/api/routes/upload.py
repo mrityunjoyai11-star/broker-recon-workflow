@@ -20,14 +20,15 @@ logger = get_logger(__name__)
 @router.post("/upload")
 async def upload_files(
     pdf_file: List[UploadFile] = File(...),
-    excel_file: List[UploadFile] = File(...),
+    excel_file: List[UploadFile] = File(default=[]),
     broker_hint: str = Form(default=""),
     flow_type: str = Form(default="receivable"),
 ):
-    """Accept one or more PDF + Excel uploads and return a session_id with saved paths.
+    """Accept one or more PDF uploads and optionally Excel confirmation files.
 
     flow_type: "receivable" (default) or "payable".
-    Multiple PDFs/Excels are supported — the first of each is the 'primary' pair.
+    Excel is OPTIONAL — the pipeline can run with PDF only.
+    Multiple PDFs/Excels are supported — the first of each is the 'primary'.
     """
     if flow_type not in ("receivable", "payable"):
         raise HTTPException(status_code=400, detail="flow_type must be 'receivable' or 'payable'")
@@ -56,9 +57,9 @@ async def upload_files(
         path = save_uploaded_file(data, ef.filename)
         excel_paths.append(str(path))
 
-    # Primary pair is the first of each
+    # Primary pair — Excel may not exist
     primary_pdf = pdf_paths[0]
-    primary_excel = excel_paths[0]
+    primary_excel = excel_paths[0] if excel_paths else None
 
     # Create a DB session row so in-progress pipelines are trackable
     factory = get_session_factory()
@@ -67,7 +68,7 @@ async def upload_files(
         db.add(ReconciliationSession(
             id=session_id,
             pdf_filename=pdf_file[0].filename,
-            excel_filename=excel_file[0].filename,
+            excel_filename=excel_file[0].filename if excel_file else None,
             broker_name=broker_hint or None,
             status="uploaded",
             flow_type=flow_type,
@@ -92,7 +93,7 @@ async def upload_files(
         "pdf_paths": pdf_paths,
         "excel_paths": excel_paths,
         "pdf_filename": pdf_file[0].filename,
-        "excel_filename": excel_file[0].filename,
+        "excel_filename": excel_file[0].filename if excel_file else None,
         "broker_hint": broker_hint or None,
         "message": "Files uploaded. Call /api/pipeline/start to begin.",
     })

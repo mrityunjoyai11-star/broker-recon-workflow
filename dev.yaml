@@ -25,6 +25,7 @@ ui:
 llm:
   provider: "anthropic"
   model: "claude-sonnet-4-20250514"
+  sipdo_model: "claude-3-haiku-20240307"      # fast model for SIPDO sub-agents (synthetic gen, evaluation, error analysis)
   api_key: ${ANTHROPIC_API_KEY}
   max_tokens: 16000
   temperature: 0.0

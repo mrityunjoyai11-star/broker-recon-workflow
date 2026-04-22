@@ -15,6 +15,7 @@ from broker_recon_flow.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _llm_instance: ChatAnthropic | None = None
+_llm_fast_instance: ChatAnthropic | None = None
 
 
 def _resolve_api_key(cfg: dict) -> str:
@@ -47,6 +48,52 @@ def get_llm() -> ChatAnthropic:
     return _llm_instance
 
 
+def get_llm_fast() -> ChatAnthropic:
+    """Return the fast/cheap LLM for SIPDO sub-agents (synthetic gen, eval, error analysis)."""
+    global _llm_fast_instance
+    if _llm_fast_instance is None:
+        cfg = get_llm_config()
+        api_key = _resolve_api_key(cfg)
+        fast_model = cfg.get("sipdo_model", "claude-3-haiku-20240307")
+        # Haiku models cap at 4096 output tokens
+        fast_max = min(cfg.get("max_tokens", 4096), 4096)
+        _llm_fast_instance = ChatAnthropic(
+            model=fast_model,
+            anthropic_api_key=api_key,
+            max_tokens=fast_max,
+            temperature=cfg.get("temperature", 0.0),
+        )
+        logger.info("Initialized fast LLM: %s", fast_model)
+    return _llm_fast_instance
+
+
+def invoke_llm_fast(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
+    """Invoke the fast/cheap LLM (for SIPDO sub-agents that don't need full Sonnet)."""
+    if max_tokens:
+        cfg = get_llm_config()
+        api_key = _resolve_api_key(cfg)
+        llm = ChatAnthropic(
+            model=cfg.get("sipdo_model", "claude-3-haiku-20240307"),
+            anthropic_api_key=api_key,
+            max_tokens=min(max_tokens, 4096),
+            temperature=cfg.get("temperature", 0.0),
+        )
+    else:
+        llm = get_llm_fast()
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    response = llm.invoke(messages)
+    return response.content
+
+
+def invoke_llm_json_fast(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
+    """Invoke fast LLM and parse JSON response (for SIPDO sub-agents)."""
+    raw = invoke_llm_fast(system_prompt, user_prompt, max_tokens=max_tokens)
+    return _parse_json_response(raw)
+
+
 def invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
     if max_tokens:
         cfg = get_llm_config()
@@ -67,8 +114,8 @@ def invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int | None = No
     return response.content
 
 
-def invoke_llm_json(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
-    raw = invoke_llm(system_prompt, user_prompt, max_tokens=max_tokens)
+def _parse_json_response(raw: str) -> dict[str, Any]:
+    """Parse a raw LLM response string into a JSON dict with multi-stage repair."""
     cleaned = raw.strip()
 
     # Strip markdown code fences — they may appear at the start or after
@@ -114,6 +161,11 @@ def invoke_llm_json(system_prompt: str, user_prompt: str, max_tokens: int | None
 
     logger.error("Failed to parse LLM JSON response: %s", raw[:500])
     return {"raw_response": raw, "parse_error": True}
+
+
+def invoke_llm_json(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
+    raw = invoke_llm(system_prompt, user_prompt, max_tokens=max_tokens)
+    return _parse_json_response(raw)
 
 
 def _repair_truncated_json(text: str):
