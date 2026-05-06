@@ -31,6 +31,15 @@ from broker_recon_flow.graph.nodes import (
     sipdo_choice_gate_node,
     sipdo_optimize_node,
     sipdo_background_node,
+    # BrokerAI Phase 2–4 nodes
+    case_router_node,
+    affirmation_gate_node,
+    resolution_node,
+    break_review_gate_node,
+    evidence_node,
+    escalation_node,
+    escalation_gate_node,
+    # Routing functions
     route_after_verify,
     route_after_classify,
     route_after_sipdo_choice,
@@ -39,6 +48,8 @@ from broker_recon_flow.graph.nodes import (
     route_after_hitl,
     route_after_re_extract_gate,
     route_after_persist,
+    route_post_affirmation,
+    route_post_escalation_gate,
 )
 from broker_recon_flow.utils.logger import get_logger
 
@@ -62,6 +73,7 @@ def build_workflow():
     builder.add_node("hitl_gate", hitl_gate_node)
     builder.add_node("re_extract_gate", re_extract_gate_node)
     builder.add_node("reconcile", reconcile_node)
+    # Output nodes
     builder.add_node("generate", generate_node)
     builder.add_node("persist", persist_node)
     builder.add_node("sipdo_background", sipdo_background_node)
@@ -109,6 +121,8 @@ def build_workflow():
         route_after_re_extract_gate,
         {"sipdo_choice_gate": "sipdo_choice_gate"},
     )
+    # ── Post-reconciliation: go straight to report generation ────────────
+    # (Gates 2-4 removed — mismatches/ghosts auto-escalated in email draft)
     builder.add_edge("reconcile", "generate")
     builder.add_edge("generate", "persist")
     # persist → sipdo_background (quick + unknown) | END
@@ -124,7 +138,7 @@ def build_workflow():
         checkpointer=checkpointer,
         interrupt_before=["sipdo_choice_gate", "hitl_gate"],
     )
-    logger.info("LangGraph workflow compiled (11 nodes, SIPDO choice + HITL interrupts, re-extract loop)")
+    logger.info("LangGraph workflow compiled (simplified: reconcile → generate → persist)")
     return compiled, checkpointer
 
 

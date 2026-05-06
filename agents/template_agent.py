@@ -47,7 +47,11 @@ def run_template_generation(
     broker_name: str | None = None,
 ) -> dict[str, bytes]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_broker = (broker_name or "unknown").replace(" ", "_")
+    raw_broker = (broker_name or "unknown").replace(" ", "_")
+    # Strip characters that are unsafe in file paths
+    safe_broker = raw_broker
+    for ch in r'/\:*?"<>|':
+        safe_broker = safe_broker.replace(ch, "_")
     filename = f"recon_{safe_broker}_{timestamp}.xlsx"
     xlsx_bytes = _build_workbook(extraction, reconciliation, broker_name, timestamp)
     logger.info("Generated report: %s (%d bytes)", filename, len(xlsx_bytes))

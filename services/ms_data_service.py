@@ -256,3 +256,55 @@ def ms_data_stats(flow_type: str = FlowType.RECEIVABLE.value) -> dict:
         "trade_id_count": len(ds.get("tid_idx", {})),
         "composite_count": len(ds.get("comp_idx", {})),
     }
+
+
+def update_recon_status(
+    matched_trade_ids: set[str],
+    mismatched_trade_ids: set[str],
+    flow_type: str = FlowType.RECEIVABLE.value,
+) -> int:
+    """Update the MS data Excel with a recon_status column.
+
+    - Matched trade_ids → 'resolved'
+    - Mismatched trade_ids → 'unresolved'
+    - Existing resolved/unresolved values for OTHER trades are preserved.
+
+    Returns count of rows updated.
+    """
+    file_path = _resolve_file_path(flow_type)
+    if not file_path.exists():
+        logger.warning("Cannot update recon status — file not found: %s", file_path)
+        return 0
+
+    try:
+        df = pd.read_excel(file_path, dtype=str)
+    except Exception as exc:
+        logger.error("Failed to read MS %s data for status update: %s", flow_type, exc)
+        return 0
+
+    if "recon_status" not in df.columns:
+        df["recon_status"] = ""
+
+    updated = 0
+    for idx, row in df.iterrows():
+        tid = str(row.get("trade_id", "")).strip().upper()
+        if not tid:
+            continue
+        if tid in matched_trade_ids:
+            df.at[idx, "recon_status"] = "resolved"
+            updated += 1
+        elif tid in mismatched_trade_ids:
+            df.at[idx, "recon_status"] = "unresolved"
+            updated += 1
+
+    try:
+        df.to_excel(file_path, index=False, sheet_name="MS Payables")
+        logger.info("Updated recon_status in %s: %d rows (%d resolved, %d unresolved)",
+                     file_path.name, updated, len(matched_trade_ids), len(mismatched_trade_ids))
+    except Exception as exc:
+        logger.error("Failed to write recon status update: %s", exc)
+        return 0
+
+    # Reload the in-memory dataset to reflect changes
+    load_ms_data(flow_type, force_reload=True)
+    return updated

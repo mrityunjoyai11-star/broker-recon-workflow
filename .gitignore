@@ -22,17 +22,53 @@ logs/
 *.log
 
 # ── Database ──────────────────────────────────────────────────
-data/reconciliation.db
-data/reconciliation.db-shm
-data/reconciliation.db-wal
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 
-# ── Runtime data directories ──────────────────────────────────
-data/raw_files/
-data/parsed_files/
-data/normalized_output/
+# ── Daemon PIDs (start.sh / stop.sh) ─────────────────────────
+.pids/
+
+# ── Runtime data: ignore all contents but keep folder structure ─
+# Pattern: ignore everything in data/, then re-include the directory
+# markers (.gitkeep) so empty folders are tracked.
+data/*
+!data/.gitkeep
+!data/raw_files/
+data/raw_files/*
+!data/raw_files/.gitkeep
+!data/parsed_files/
+data/parsed_files/*
+!data/parsed_files/.gitkeep
+!data/normalized_output/
+data/normalized_output/*
+!data/normalized_output/.gitkeep
+!data/email_drafts_saved/
+data/email_drafts_saved/*
+!data/email_drafts_saved/.gitkeep
+!data/NAS_PATH/
+data/NAS_PATH/*
+!data/NAS_PATH/.gitkeep
+!data/NAS_PATH/payables/
+data/NAS_PATH/payables/*
+!data/NAS_PATH/payables/.gitkeep
+!data/NAS_PATH/payables/Processed/
+data/NAS_PATH/payables/Processed/*
+!data/NAS_PATH/payables/Processed/.gitkeep
+!data/NAS_PATH/payables/Error/
+data/NAS_PATH/payables/Error/*
+!data/NAS_PATH/payables/Error/.gitkeep
+!data/NAS_PATH/receivable/
+data/NAS_PATH/receivable/*
+!data/NAS_PATH/receivable/.gitkeep
+!data/NAS_PATH/receivable/Processed/
+data/NAS_PATH/receivable/Processed/*
+!data/NAS_PATH/receivable/Processed/.gitkeep
+!data/NAS_PATH/receivable/Error/
+data/NAS_PATH/receivable/Error/*
+!data/NAS_PATH/receivable/Error/.gitkeep
 
 # ── MS client / receivables data ─────────────────────────────
 documentation/ms_receivables_client_base_data.xlsx

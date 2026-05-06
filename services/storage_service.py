@@ -35,9 +35,16 @@ def save_uploaded_file(file_bytes: bytes, original_name: str, subdir: str = "raw
     return dest
 
 
+def _sanitize_filename(name: str) -> str:
+    """Replace characters that are unsafe in file paths."""
+    for ch in r'/\:*?"<>|':
+        name = name.replace(ch, "_")
+    return name
+
+
 def save_output_file(file_bytes: bytes, filename: str) -> Path:
     storage = get_storage_path("normalized_output")
-    dest = storage / filename
+    dest = storage / _sanitize_filename(filename)
     dest.write_bytes(file_bytes)
     logger.info("Saved output file: %s", dest)
     return dest

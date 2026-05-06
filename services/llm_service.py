@@ -49,37 +49,46 @@ def get_llm() -> ChatAnthropic:
 
 
 def get_llm_fast() -> ChatAnthropic:
-    """Return the fast/cheap LLM for SIPDO sub-agents (synthetic gen, eval, error analysis)."""
+    """Return the fast/cheap LLM for SIPDO sub-agents.
+
+    Falls back to the main model if the configured fast model is unavailable.
+    """
     global _llm_fast_instance
     if _llm_fast_instance is None:
         cfg = get_llm_config()
         api_key = _resolve_api_key(cfg)
-        fast_model = cfg.get("sipdo_model", "claude-3-haiku-20240307")
-        # Haiku models cap at 4096 output tokens
-        fast_max = min(cfg.get("max_tokens", 4096), 4096)
-        _llm_fast_instance = ChatAnthropic(
-            model=fast_model,
-            anthropic_api_key=api_key,
-            max_tokens=fast_max,
-            temperature=cfg.get("temperature", 0.0),
-        )
-        logger.info("Initialized fast LLM: %s", fast_model)
+        fast_model = cfg.get("sipdo_model", "")
+        main_model = cfg.get("model", "claude-sonnet-4-20250514")
+
+        if fast_model and fast_model != main_model:
+            try:
+                # Test the fast model with a tiny call
+                test_llm = ChatAnthropic(
+                    model=fast_model, anthropic_api_key=api_key,
+                    max_tokens=10, temperature=0.0,
+                )
+                test_llm.invoke([HumanMessage(content="hi")])
+                # Fast model works — use it with capped tokens
+                fast_max = min(cfg.get("max_tokens", 4096), 4096)
+                _llm_fast_instance = ChatAnthropic(
+                    model=fast_model, anthropic_api_key=api_key,
+                    max_tokens=fast_max, temperature=cfg.get("temperature", 0.0),
+                )
+                logger.info("Initialized fast LLM: %s", fast_model)
+            except Exception as exc:
+                logger.warning("Fast model '%s' unavailable (%s), falling back to main model", fast_model, exc)
+                _llm_fast_instance = get_llm()
+        else:
+            # No fast model configured — use main model
+            _llm_fast_instance = get_llm()
+            logger.info("Fast LLM: using main model (no separate sipdo_model configured)")
     return _llm_fast_instance
 
 
 def invoke_llm_fast(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
-    """Invoke the fast/cheap LLM (for SIPDO sub-agents that don't need full Sonnet)."""
-    if max_tokens:
-        cfg = get_llm_config()
-        api_key = _resolve_api_key(cfg)
-        llm = ChatAnthropic(
-            model=cfg.get("sipdo_model", "claude-3-haiku-20240307"),
-            anthropic_api_key=api_key,
-            max_tokens=min(max_tokens, 4096),
-            temperature=cfg.get("temperature", 0.0),
-        )
-    else:
-        llm = get_llm_fast()
+    """Invoke the fast/cheap LLM (for SIPDO sub-agents that don't need full Sonnet).
+    Falls back to main model if fast model unavailable."""
+    llm = get_llm_fast()
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),

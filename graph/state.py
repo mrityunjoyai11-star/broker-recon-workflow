@@ -52,6 +52,7 @@ class GraphState(BaseModel):
     sipdo_strategy: Optional[str] = None     # None | "quick" | "optimize"
     sipdo_optimized_prompt: Optional[str] = None      # generated extraction prompt
     sipdo_optimization_trace: Optional[list] = None   # iteration logs
+    sipdo_accuracy_score: Optional[float] = None      # final SIPDO accuracy 0.0-1.0
 
     # ── HITL ─────────────────────────────────────────────────────────────
     hitl_pending: bool = False
@@ -64,6 +65,24 @@ class GraphState(BaseModel):
     parsed_file_path: Optional[str] = None   # path to saved parsed-trades Excel
     # ── MS data ──────────────────────────────────────────────────────────
     ms_data_loaded: bool = False
+
+    # ── Case Management (Phase 2) ────────────────────────────────────────
+    cases: List[Dict] = Field(default_factory=list)              # serialised Case dicts from case_router
+    affirmation_pending: bool = False
+    affirmation_decisions: Dict = Field(default_factory=dict)    # {case_id: "affirm"|"request_resolution"|"reject"|"flag_booking"|"escalate_tsg"}
+    has_breaks: bool = False
+    has_ghosts: bool = False
+
+    # ── Resolution (Phase 3) ─────────────────────────────────────────────
+    resolution_results: List[Dict] = Field(default_factory=list)
+    break_review_pending: bool = False
+    break_review_decisions: Dict = Field(default_factory=dict)   # {case_id: {approved, reviewer_notes, edited_email}}
+
+    # ── Evidence + Escalation (Phase 4) ──────────────────────────────────
+    evidence_packages: List[Dict] = Field(default_factory=list)
+    escalation_drafts: List[Dict] = Field(default_factory=list)
+    escalation_pending: bool = False
+    escalation_decisions: Dict = Field(default_factory=dict)     # {case_id: {approved, reviewer_notes}}
 
     # ── Audit log ────────────────────────────────────────────────────────
     logs: List[str] = Field(default_factory=list)

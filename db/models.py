@@ -122,3 +122,85 @@ class OptimizedPromptCache(Base):
     source_session_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── BrokerAI Phase 1–4 Models ────────────────────────────────────────────────
+
+class Case(Base):
+    """One case per trade in a reconciliation session."""
+    __tablename__ = "cases"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    session_id = Column(String, ForeignKey("reconciliation_sessions.id"), nullable=False, index=True)
+    extracted_trade_id = Column(String, nullable=True)    # FK to extracted_trades.id (NULL for MISSING)
+    case_type = Column(String, nullable=False)            # matched / break / ghost / missing
+    status = Column(String, default="open")               # open / affirmed / in_dispute / resolved / rejected / pending_booking / escalated
+    broker_trade_snapshot = Column(JSON, nullable=True)    # serialised trade dict
+    ms_trade_snapshot = Column(JSON, nullable=True)        # serialised MS trade dict
+    differences = Column(JSON, nullable=True)              # per-field diff dict
+    confidence_score = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+
+    session = relationship("ReconciliationSession", backref="cases")
+
+
+class AuditEvent(Base):
+    """Append-only audit trail. NEVER update rows."""
+    __tablename__ = "audit_events"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    session_id = Column(String, ForeignKey("reconciliation_sessions.id"), nullable=False, index=True)
+    case_id = Column(String, nullable=True, index=True)   # nullable — session-level events have no case
+    event_type = Column(String, nullable=False)            # AuditEventType enum value
+    actor = Column(String, default="system")               # "system" | "human"
+    details = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class BreakResolution(Base):
+    """Resolution analysis for a MISMATCH case."""
+    __tablename__ = "break_resolutions"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    root_cause = Column(Text, nullable=True)               # e.g. "partial fill", "booking error"
+    break_type = Column(String, nullable=True)              # partial_fill / booking_error / price_discrepancy / direction_mismatch / other
+    severity = Column(String, default="medium")             # high / medium / low
+    draft_broker_email = Column(Text, nullable=True)
+    human_approved = Column(Boolean, default=False)
+    reviewer_notes = Column(Text, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    case = relationship("Case", backref="resolutions")
+
+
+class EvidencePackage(Base):
+    """Compiled evidence for a break case."""
+    __tablename__ = "evidence_packages"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    sources = Column(JSON, nullable=True)                   # list of {source_name, source_type, data, corroborates_firm}
+    corroboration_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    case = relationship("Case", backref="evidence_packages")
+
+
+class EscalationRecord(Base):
+    """Escalation email draft for trade support group."""
+    __tablename__ = "escalation_records"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    draft_email = Column(Text, nullable=True)
+    urgency = Column(String, default="medium")              # high / medium / low
+    human_approved = Column(Boolean, default=False)
+    reviewer_notes = Column(Text, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    dispatched = Column(Boolean, default=False)             # True once email actually sent (Phase 7)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    case = relationship("Case", backref="escalation_records")

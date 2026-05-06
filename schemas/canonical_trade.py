@@ -47,10 +47,55 @@ class PipelineStatus(str, Enum):
     EXTRACTING = "extracting"
     HITL_REVIEW = "hitl_review"
     RECONCILING = "reconciling"
+    PENDING_AFFIRMATION = "pending_affirmation"        # Gate 2: review recon results
+    RESOLVING_BREAKS = "resolving_breaks"              # Resolution agent working
+    PENDING_BREAK_REVIEW = "pending_break_review"      # Gate 3: review resolutions
+    COMPILING_EVIDENCE = "compiling_evidence"           # Evidence agent working
+    ESCALATING = "escalating"                          # Escalation agent working
+    PENDING_ESCALATION_REVIEW = "pending_escalation_review"  # Gate 4: review escalation
     GENERATING = "generating"
     PERSISTING = "persisting"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class CaseType(str, Enum):
+    MATCHED = "matched"
+    BREAK = "break"          # MISMATCH
+    GHOST = "ghost"          # NEW — broker-only, no MS record
+    MISSING = "missing"      # MS-only, not in broker
+
+
+class CaseStatus(str, Enum):
+    OPEN = "open"
+    AFFIRMED = "affirmed"
+    IN_DISPUTE = "in_dispute"
+    RESOLVED = "resolved"
+    REJECTED = "rejected"
+    PENDING_BOOKING = "pending_booking"
+    ESCALATED = "escalated"
+
+
+class Severity(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class AuditEventType(str, Enum):
+    SESSION_STARTED = "session_started"
+    EXTRACTED = "extracted"
+    HITL1_APPROVED = "hitl1_approved"
+    RECONCILED = "reconciled"
+    CASE_CREATED = "case_created"
+    AFFIRMED = "affirmed"
+    RESOLUTION_DRAFTED = "resolution_drafted"
+    RESOLUTION_APPROVED = "resolution_approved"
+    EVIDENCE_COMPILED = "evidence_compiled"
+    ESCALATION_DRAFTED = "escalation_drafted"
+    ESCALATION_APPROVED = "escalation_approved"
+    EMAIL_DRAFT_SAVED = "email_draft_saved"
+    COMPLETED = "completed"
 
 
 # ── Core Trade Models ───────────────────────────────────────────────────────

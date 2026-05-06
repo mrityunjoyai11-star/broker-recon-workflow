@@ -196,6 +196,21 @@ def reconcile_node(state: GraphState) -> dict:
             flow_type=state.flow_type,
         )
         updates["reconciliation"] = result
+
+        # Update MS payables Excel with resolved/unresolved status
+        matched_ids = set()
+        mismatched_ids = set()
+        for m in result.matched:
+            if m.ms_trade and m.ms_trade.trade_id:
+                matched_ids.add(m.ms_trade.trade_id.strip().upper())
+        for m in result.mismatched:
+            if m.ms_trade and m.ms_trade.trade_id:
+                mismatched_ids.add(m.ms_trade.trade_id.strip().upper())
+        if matched_ids or mismatched_ids:
+            n_updated = ms_svc.update_recon_status(matched_ids, mismatched_ids, flow_type=state.flow_type)
+            logger.info("Updated %d MS trade statuses (resolved=%d, unresolved=%d)",
+                        n_updated, len(matched_ids), len(mismatched_ids))
+
         log = (
             f"Reconcile: matched={result.summary.get('matched_count', 0)}, "
             f"mismatched={result.summary.get('mismatched_count', 0)}, "
@@ -346,6 +361,7 @@ def sipdo_optimize_node(state: GraphState) -> dict:
         )
         updates["sipdo_optimized_prompt"] = result.get("optimized_prompt")
         updates["sipdo_optimization_trace"] = result.get("trace", [])
+        updates["sipdo_accuracy_score"] = result.get("accuracy_score", 0.0)
         logs_so_far.append(
             f"SIPDO optimization complete: accuracy={result.get('accuracy_score', 0):.0%}, "
             f"iterations={result.get('iteration_count', 0)}"
@@ -527,3 +543,188 @@ def route_after_extract(state: GraphState) -> str:
     if state.error:
         return "end"
     return "hitl_gate"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BrokerAI Phase 2–4 Nodes
+# ══════════════════════════════════════════════════════════════════════════════
+
+from broker_recon_flow.agents import case_router_agent, resolution_agent, evidence_agent, escalation_agent
+
+
+# ── Node: Case Router ────────────────────────────────────────────────────────
+
+def case_router_node(state: GraphState) -> dict:
+    logger.info("[case_router_node] session=%s", state.session_id)
+    updates: dict = {"current_step": "case_router"}
+
+    try:
+        result = case_router_agent.run_case_routing(
+            session_id=state.session_id,
+            reconciliation=state.reconciliation,
+        )
+        updates["cases"] = result["cases"]
+        updates["has_breaks"] = result["has_breaks"]
+        updates["has_ghosts"] = result["has_ghosts"]
+        updates["affirmation_pending"] = True
+        updates["status"] = PipelineStatus.PENDING_AFFIRMATION.value
+        log = (
+            f"Case router: {len(result['cases'])} cases created "
+            f"(breaks={result['has_breaks']}, ghosts={result['has_ghosts']})"
+        )
+        updates["logs"] = state.logs + [log]
+    except Exception as exc:
+        logger.exception("case_router_node error")
+        updates["error"] = str(exc)
+        updates["status"] = PipelineStatus.FAILED.value
+
+    return updates
+
+
+# ── Node: Affirmation Gate (Gate 2) ──────────────────────────────────────────
+
+def affirmation_gate_node(state: GraphState) -> dict:
+    logger.info("[affirmation_gate] session=%s awaiting affirmation", state.session_id)
+    return {
+        "status": PipelineStatus.PENDING_AFFIRMATION.value,
+        "current_step": "affirmation_gate",
+        "logs": state.logs + ["Affirmation gate: awaiting ops review of reconciliation results"],
+    }
+
+
+# ── Node: Resolution ─────────────────────────────────────────────────────────
+
+def resolution_node(state: GraphState) -> dict:
+    logger.info("[resolution_node] session=%s", state.session_id)
+    updates: dict = {"status": PipelineStatus.RESOLVING_BREAKS.value, "current_step": "resolution"}
+
+    # Filter to break cases that user requested resolution for
+    break_cases = [
+        c for c in state.cases
+        if c["case_type"] == "break"
+        and state.affirmation_decisions.get(c["case_id"]) == "request_resolution"
+    ]
+
+    if not break_cases:
+        updates["resolution_results"] = []
+        updates["logs"] = state.logs + ["Resolution: no breaks to resolve"]
+        return updates
+
+    try:
+        results = resolution_agent.run_resolution(
+            session_id=state.session_id,
+            broker_name=state.broker_name or "Unknown",
+            break_cases=break_cases,
+        )
+        updates["resolution_results"] = results
+        updates["break_review_pending"] = True
+        updates["status"] = PipelineStatus.PENDING_BREAK_REVIEW.value
+        updates["logs"] = state.logs + [f"Resolution: {len(results)} break resolutions drafted"]
+    except Exception as exc:
+        logger.exception("resolution_node error")
+        updates["error"] = str(exc)
+        updates["status"] = PipelineStatus.FAILED.value
+
+    return updates
+
+
+# ── Node: Break Review Gate (Gate 3) ─────────────────────────────────────────
+
+def break_review_gate_node(state: GraphState) -> dict:
+    logger.info("[break_review_gate] session=%s awaiting break review", state.session_id)
+    return {
+        "status": PipelineStatus.PENDING_BREAK_REVIEW.value,
+        "current_step": "break_review_gate",
+        "logs": state.logs + ["Break review gate: awaiting ops review of resolutions"],
+    }
+
+
+# ── Node: Evidence ───────────────────────────────────────────────────────────
+
+def evidence_node(state: GraphState) -> dict:
+    logger.info("[evidence_node] session=%s", state.session_id)
+    updates: dict = {"status": PipelineStatus.COMPILING_EVIDENCE.value, "current_step": "evidence"}
+
+    # Approved break cases
+    approved_cases = [
+        c for c in state.cases
+        if c["case_type"] == "break"
+        and state.break_review_decisions.get(c["case_id"], {}).get("approved", False)
+    ]
+
+    try:
+        packages = evidence_agent.run_evidence_compilation(
+            session_id=state.session_id,
+            broker_name=state.broker_name or "Unknown",
+            approved_cases=approved_cases,
+            resolution_results=state.resolution_results,
+        )
+        updates["evidence_packages"] = packages
+        updates["logs"] = state.logs + [f"Evidence: {len(packages)} packages compiled"]
+    except Exception as exc:
+        logger.exception("evidence_node error")
+        updates["error"] = str(exc)
+        updates["status"] = PipelineStatus.FAILED.value
+
+    return updates
+
+
+# ── Node: Escalation ─────────────────────────────────────────────────────────
+
+def escalation_node(state: GraphState) -> dict:
+    logger.info("[escalation_node] session=%s", state.session_id)
+    updates: dict = {"status": PipelineStatus.ESCALATING.value, "current_step": "escalation"}
+
+    approved_cases = [
+        c for c in state.cases
+        if c["case_type"] == "break"
+        and state.break_review_decisions.get(c["case_id"], {}).get("approved", False)
+    ]
+
+    try:
+        drafts = escalation_agent.run_escalation(
+            session_id=state.session_id,
+            broker_name=state.broker_name or "Unknown",
+            break_cases=approved_cases,
+            evidence_packages=state.evidence_packages,
+            resolution_results=state.resolution_results,
+        )
+        updates["escalation_drafts"] = drafts
+        updates["escalation_pending"] = True
+        updates["status"] = PipelineStatus.PENDING_ESCALATION_REVIEW.value
+        updates["logs"] = state.logs + [f"Escalation: {len(drafts)} drafts created"]
+    except Exception as exc:
+        logger.exception("escalation_node error")
+        updates["error"] = str(exc)
+        updates["status"] = PipelineStatus.FAILED.value
+
+    return updates
+
+
+# ── Node: Escalation Gate (Gate 4) ───────────────────────────────────────────
+
+def escalation_gate_node(state: GraphState) -> dict:
+    logger.info("[escalation_gate] session=%s awaiting escalation review", state.session_id)
+    return {
+        "status": PipelineStatus.PENDING_ESCALATION_REVIEW.value,
+        "current_step": "escalation_gate",
+        "logs": state.logs + ["Escalation gate: awaiting ops approval of escalation emails"],
+    }
+
+
+# ── Routing: Post-Affirmation ────────────────────────────────────────────────
+
+def route_post_affirmation(state: GraphState) -> str:
+    """After affirmation gate: route to resolution if breaks need resolution, else generate."""
+    needs_resolution = any(
+        v == "request_resolution"
+        for v in state.affirmation_decisions.values()
+    )
+    if needs_resolution:
+        return "resolution"
+    return "generate"
+
+
+def route_post_escalation_gate(state: GraphState) -> str:
+    """After escalation gate approval, proceed to generate."""
+    return "generate"

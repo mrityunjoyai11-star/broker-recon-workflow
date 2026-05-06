@@ -71,18 +71,56 @@ one or more tables with trade details or no trades at all (e.g. cover pages,
 summary pages, T&C pages).  The tables are represented as whitespace-aligned or
 pipe-separated columns in the raw text.
 
+CRITICAL — How to parse whitespace-aligned tables:
+1. FIRST, find the header row. It lists column names like "Date", "Trade ID",
+   "B/S", "Qty", "Product", "Price", "Brokerage", etc.
+2. The header tells you the column order. Every data row below follows the SAME
+   column order.  Tokens are separated by whitespace.
+3. For wide tables (10+ columns), carefully map each token to its column based
+   on position.  Common broker table columns include:
+   Date | Trader | Exchange | Account | Trade ID | B/S | Qty | Product/Instrument |
+   Term/Delivery | Strike | Price | Type | Rate(bps) | Brokerage/Commission
+4. A single trade may have MULTIPLE rows in the PDF if it has different delivery
+   terms (e.g. Jan-26, Feb-26, Mar-26) — each is a SEPARATE trade record.
+5. "B" = BUY, "S" = SELL in the B/S column.
+
+IMPORTANT — Page-level context fields:
+Many fields appear ONCE in the page header/footer area, NOT in each table row.
+You MUST look for these in the surrounding text and apply them to EVERY trade:
+- invoice_id: Look for "Invoice #", "Invoice No", "Invoice NB", "Ref" in header
+- invoice_date: Look for "Date:", "Invoice Date:", "Period:", "For the period"
+- currency: Look for "USD", "EUR", "GBP", "AUD", "NZD", "Total Amount Due (USD)" etc.
+  If the currency appears in totals or headers, apply it to all trades.
+- client_account: Look for "Account:", "Account No:", "Customer ID:", "Bill To:",
+  "Client:" in the header.  If it appears per-row in the table, use the row value.
+  If not, use the page-level value.
+- broker_name: Look for the company name in the header (e.g. "Evolution Markets",
+  "Peak Commodity Group", "Tradition Financial Services")
+
 Your job:
-1. Identify ALL rows that represent individual trade / deal records.
-2. For EACH trade row, extract as many of the canonical fields below as you can
-   find.  Leave a field as null if it is not present.
-3. Skip header rows, sub-total rows, grand-total rows, blank rows, and
+1. FIRST scan the ENTIRE page text for page-level context (invoice_id, date,
+   currency, client_account, broker_name). These apply to ALL trades on this page.
+2. Identify ALL rows that represent individual trade / deal records.
+3. For EACH trade row, extract as many of the canonical fields below as you can
+   find.  Merge row-level fields with page-level context.
+4. Skip header rows, sub-total rows, grand-total rows, blank rows, and
    non-trade narrative text.
-4. If the page has NO trade rows at all, return {"trades": [], "confidence": 1.0}.
+5. If the page has NO trade rows at all, return {"trades": [], "confidence": 1.0}.
 
 Canonical fields (use these exact names in your output):
   trade_id, trade_date, instrument, exchange, buy_sell, quantity, unit, price,
   delivery_start, delivery_end, counterparty, client_account, brokerage_rate,
   brokerage_amount, currency, invoice_id, invoice_date
+
+Field mapping hints from common broker formats:
+- "Account" or "Account No" → client_account
+- "Rate (bps)" or "Rate Case" → brokerage_rate (convert bps to decimal: 5.00 bps = 0.0005)
+- "Brokerage" or "Commission" or "Total" → brokerage_amount
+- "Term" or "Delivery Period" → delivery_start (parse "Jan-26" as "2026-01-01", "Feb-26" as "2026-02-01")
+- "Product" or "Description" → instrument
+- "Exch" or "Exchange" → exchange
+- "Strike" → price (if no separate "Price" column, use Strike)
+- "Type" (e.g. OUTRIGHT, SPREAD) → unit
 
 Formatting rules:
 - Numeric fields (quantity, price, brokerage_rate, brokerage_amount) must be
@@ -94,10 +132,26 @@ Formatting rules:
 
 Return ONLY valid JSON (no markdown fences, no commentary):
 {
-  "trades": [ {"trade_id": ..., "trade_date": ..., ...}, ... ],
-  "invoice_id": "...",
+  "trades": [ {"trade_id": ..., "trade_date": ..., "instrument": ..., "exchange": ...,
+               "buy_sell": ..., "quantity": ..., "price": ..., "brokerage_amount": ...,
+               "currency": "USD", "client_account": "...", "invoice_id": "...",
+               "invoice_date": "...", "delivery_start": ..., "brokerage_rate": ..., ...}, ... ],
+  "invoice_id": "page-level invoice ID",
+  "invoice_date": "page-level invoice date in YYYY-MM-DD",
+  "currency": "page-level currency code like USD, EUR, AUD",
+  "client_account": "page-level account number from header",
   "confidence": 0.0-1.0
-}"""
+}
+
+CRITICAL RULES:
+1. Every trade MUST have currency, invoice_id, invoice_date, and client_account
+   populated from page context if not available per-row. Do NOT leave them null
+   when they exist anywhere on the page.
+2. Trades with the SAME trade_id but DIFFERENT delivery terms (e.g. Jan-26 vs
+   Feb-26 vs Mar-26) are SEPARATE trades — do NOT merge or skip them.
+3. The top-level invoice_id, invoice_date, currency, client_account fields MUST
+   be populated from the page header/footer even if they're not in the table.
+4. For "For the period X through Y" → invoice_date should be Y (the end date)."""
 
 
 def run_extraction(
@@ -197,10 +251,22 @@ def run_extraction(
             )
             logger.warning("Low extraction coverage: %d/%d (%.0f%%)", len(trades), excel_row_count, ratio * 100)
 
-    confidence = 0.9 if extraction_method == "template" else (0.85 if "cached" in extraction_method else 0.70)
     if not trades:
         confidence = 0.0
         warnings.append("No trades extracted")
+    else:
+        # Base confidence from method reliability
+        if extraction_method == "template":
+            method_base = 0.95
+        elif "sipdo" in extraction_method or "cached" in extraction_method:
+            method_base = 0.90  # SIPDO-optimized or cached prompts (≥85% accuracy)
+        elif "fuzzy" in extraction_method:
+            method_base = 0.80
+        else:
+            method_base = 0.70  # generic LLM fallback
+        # Adjust by actual field completeness (how many trades have core fields populated)
+        completeness = _field_completeness(trades)
+        confidence = round(method_base * (0.5 + 0.5 * completeness), 2)
 
     result = ExtractionResult(
         trades=trades,
@@ -296,7 +362,7 @@ def _extract_fuzzy_or_llm(
                     "value_rules": {"buy_sell": {r"B|Buy|BUY": "BUY", r"S|Sell|SELL": "SELL"}, "currency": {"default": "USD"}},
                 }
                 trades = dataframe_to_trades(combined_df, synthetic, file_path, source_type, broker_name, invoice_id)
-                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count, trades=trades):
                     return trades, warnings, "fuzzy_match", mapping
                 elif trades:
                     logger.info(
@@ -312,7 +378,7 @@ def _extract_fuzzy_or_llm(
                 trades, llm_mapping = _llm_map_and_extract(
                     combined_df, file_path, source_type, broker_name, invoice_id,
                 )
-                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count, trades=trades):
                     return trades, warnings, "llm_column_map", llm_mapping
                 elif trades and (not _table_best or len(trades) > len(_table_best[0])):
                     _table_best = (trades, warnings[:], "llm_column_map", llm_mapping)
@@ -331,7 +397,7 @@ def _extract_fuzzy_or_llm(
             if sipdo:
                 logger.info("Tier 4b SIPDO chunked on combined PDF tables")
                 trades = _sipdo_chunked_extract(sipdo, combined_df, file_path, source_type, broker_name, invoice_id)
-                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count):
+                if trades and _is_extraction_adequate(len(trades), len(combined_df), excel_row_count, trades=trades):
                     return trades, warnings, "sipdo_table_extract", None
                 elif trades and (not _table_best or len(trades) > len(_table_best[0])):
                     _table_best = (trades, warnings[:], "sipdo_table_extract", None)
@@ -354,19 +420,34 @@ def _extract_fuzzy_or_llm(
                 prompt = LLM_FULL_EXTRACT_PROMPT
                 method = "llm_concurrent_page"
 
+            # Detect header row from raw text to help Tier 5 understand column structure
+            pages_text = parser.extract_pages_text()
+            detected_headers = _detect_header_row(pages_text) if pages_text else None
+
             logger.info(
                 "Tier 5 concurrent PDF extraction (%s, %d workers)",
                 method, _PDF_WORKERS,
             )
-            trades = _llm_concurrent_pdf_extract(parser, prompt, file_path, broker_name, invoice_id)
+            trades = _llm_concurrent_pdf_extract(
+                parser, prompt, file_path, broker_name, invoice_id,
+                detected_headers=detected_headers,
+            )
             if trades:
-                # If we also have a table-based fallback, return whichever got more trades
-                if _table_best and len(_table_best[0]) > len(trades):
+                # Compare Tier 5 vs table fallback using BOTH count AND field completeness
+                if _table_best and _table_best[0]:
+                    t5_completeness = _field_completeness(trades)
+                    tb_completeness = _field_completeness(_table_best[0])
+                    t5_score = len(trades) * t5_completeness
+                    tb_score = len(_table_best[0]) * tb_completeness
                     logger.info(
-                        "Tier 5 produced %d trades, table fallback had %d — using table result",
-                        len(trades), len(_table_best[0]),
+                        "Tier 5: %d trades × %.0f%% fields = score %.1f | "
+                        "Table fallback: %d trades × %.0f%% fields = score %.1f",
+                        len(trades), t5_completeness * 100, t5_score,
+                        len(_table_best[0]), tb_completeness * 100, tb_score,
                     )
-                    return _table_best
+                    if tb_score > t5_score:
+                        logger.info("Table fallback wins — using it")
+                        return _table_best
                 return trades, warnings, method, None
 
         # Return table-based fallback if Tier 5 produced nothing
@@ -484,18 +565,60 @@ def _sipdo_chunked_extract(
     return all_trades
 
 
-def _is_extraction_adequate(trade_count: int, combined_df_rows: int, excel_row_count: int) -> bool:
-    """Check if extracted trade count is adequate to accept as final result.
+def _field_completeness(trades: list[TradeRecord]) -> float:
+    """Return fraction of trades that have ≥3 core fields populated.
+
+    Primary core fields: trade_date, instrument, quantity, price.
+    Alternative field: brokerage_amount (capped at +1 contribution).
+    This allows brokerage-invoice-style PDFs (which lack trade_date/price
+    but have instrument + quantity + brokerage_amount) to pass.
+    Returns 0.0 if trades is empty.
+    """
+    if not trades:
+        return 0.0
+    core_fields = ("trade_date", "instrument", "quantity", "price")
+    alt_fields = ("brokerage_amount",)
+    well_populated = 0
+    for t in trades:
+        populated = sum(1 for f in core_fields if getattr(t, f, None) is not None)
+        alt_populated = min(1, sum(1 for f in alt_fields if getattr(t, f, None) is not None))
+        if (populated + alt_populated) >= 3:
+            well_populated += 1
+    return well_populated / len(trades)
+
+
+def _is_extraction_adequate(
+    trade_count: int,
+    combined_df_rows: int,
+    excel_row_count: int,
+    trades: list[TradeRecord] | None = None,
+) -> bool:
+    """Check if extracted trade count AND field quality are adequate.
 
     Returns True if extraction is good enough to return immediately.
     Returns False if we should continue trying higher tiers.
+
+    Field completeness check: if most trades have key fields (trade_date,
+    instrument, quantity, price) as None, the extraction is garbage even
+    if the count looks right — e.g. pdfplumber merged all columns into one.
     """
     if trade_count == 0:
         return False
-    # If we have an Excel reference, require at least 20% coverage and ≥ 3 trades
+
+    # Field completeness check — at least 40% of trades must have ≥3 of
+    # the 4 core fields populated
+    if trades:
+        completeness = _field_completeness(trades)
+        if completeness < 0.4:
+            logger.info(
+                "Field completeness too low: %.0f%% of trades have ≥3 core fields",
+                completeness * 100,
+            )
+            return False
+
+    # Count-based checks
     if excel_row_count > 0:
         return trade_count >= max(3, int(0.2 * excel_row_count))
-    # No Excel reference — accept if ≥ 3 trades or ≥ 30% of available rows
     return trade_count >= max(3, int(0.3 * combined_df_rows))
 
 
@@ -588,9 +711,36 @@ def _concat_pdf_tables_by_schema(
     return combined
 
 
+def _detect_header_row(pages_text: list[str]) -> str | None:
+    """Detect the table header row from raw PDF text.
+
+    Scans the first 2 pages for a line containing ≥3 known column keywords.
+    Returns the header line if found, else None.
+    """
+    _HEADER_KEYWORDS = [
+        "date", "trade", "price", "qty", "quantity", "buy", "sell", "b/s",
+        "product", "instrument", "brokerage", "commission", "account",
+        "exchange", "exch", "currency", "rate", "term", "type", "strike",
+        "reference", "ref", "description", "volume", "counterparty",
+        "delivery", "start", "end", "invoice",
+    ]
+    for page in pages_text[:2]:
+        for line in page.split("\n"):
+            lower = line.lower()
+            hits = sum(1 for kw in _HEADER_KEYWORDS if kw in lower.split())
+            # Also check for multi-word matches
+            hits += sum(1 for kw in ["trade id", "trade date", "buy/sell",
+                                      "client account", "rate (bps)", "start date",
+                                      "end date", "ref. no"] if kw in lower)
+            if hits >= 3:
+                return line.strip()
+    return None
+
+
 def _llm_concurrent_pdf_extract(
     parser: PDFParser, prompt: str, source_file: str,
     broker_name: str | None, invoice_id: str | None,
+    detected_headers: str | None = None,
 ) -> list[TradeRecord]:
     """Extract trades from a PDF by running LLM calls for all pages in parallel.
 
@@ -603,6 +753,12 @@ def _llm_concurrent_pdf_extract(
     if not pages:
         return []
 
+    # Auto-detect header row if not provided
+    if not detected_headers:
+        detected_headers = _detect_header_row(pages)
+    if detected_headers:
+        logger.info("Tier 5: detected table headers: %s", detected_headers[:120])
+
     n_pages = len(pages)
     logger.info(
         "Tier 5 concurrent PDF extraction: %d pages, %d workers",
@@ -612,9 +768,19 @@ def _llm_concurrent_pdf_extract(
     def _call_page(page_idx: int, page_text: str) -> tuple[int, list[TradeRecord]]:
         if not page_text or not page_text.strip():
             return page_idx, []
+        header_hint = ""
+        if detected_headers:
+            header_hint = (
+                f"\nIMPORTANT: The table columns in this document are:\n"
+                f"  {detected_headers}\n"
+                f"Parse EVERY data row using these column positions. "
+                f"Each row of numbers/text below the header is one trade. "
+                f"Map each value to the correct column by position.\n"
+            )
         context = (
             f"Broker: {broker_name or 'Unknown'}\n"
-            f"Page {page_idx + 1} of {n_pages}\n\n"
+            f"Page {page_idx + 1} of {n_pages}\n"
+            f"{header_hint}\n"
             f"{page_text}"
         )
         result = invoke_llm_json(prompt, context, max_tokens=16000)
@@ -705,17 +871,34 @@ def _parse_llm_trade_result(
     result: Any, source_file: str, source_type: str,
     broker_name: str | None, invoice_id: str | None,
 ) -> list[TradeRecord]:
-    """Parse an LLM JSON response into TradeRecord objects."""
+    """Parse an LLM JSON response into TradeRecord objects.
+
+    Page-level context fields (invoice_id, invoice_date, currency, client_account)
+    from the top-level JSON are propagated to every trade that doesn't have them
+    at the row level.
+    """
     if isinstance(result, list):
         raw_trades = result
         top_invoice_id = invoice_id
+        top_invoice_date = None
+        top_currency = None
+        top_client_account = None
     elif isinstance(result, dict):
         if result.get("parse_error"):
             return []
         raw_trades = result.get("trades", [])
         top_invoice_id = result.get("invoice_id") or invoice_id
+        top_invoice_date = result.get("invoice_date")
+        top_currency = result.get("currency")
+        top_client_account = result.get("client_account")
     else:
         return []
+
+    def _s(val) -> str | None:
+        """Coerce LLM-returned value to a string (or None) — handles int/float trade_ids."""
+        if val is None or val == "":
+            return None
+        return str(val)
 
     trades: list[TradeRecord] = []
     for raw in raw_trades:
@@ -723,25 +906,26 @@ def _parse_llm_trade_result(
             continue
         try:
             trades.append(TradeRecord(
-                invoice_id=top_invoice_id,
+                invoice_id=_s(raw.get("invoice_id")) or _s(top_invoice_id),
+                invoice_date=_s(raw.get("invoice_date")) or _s(top_invoice_date),
                 broker_name=broker_name,
                 source_file=source_file,
                 source_type=source_type,
-                trade_id=raw.get("trade_id"),
-                trade_date=str(raw["trade_date"]) if raw.get("trade_date") else None,
-                instrument=raw.get("instrument"),
-                exchange=raw.get("exchange"),
-                buy_sell=raw.get("buy_sell"),
+                trade_id=_s(raw.get("trade_id")),
+                trade_date=_s(raw.get("trade_date")),
+                instrument=_s(raw.get("instrument")),
+                exchange=_s(raw.get("exchange")),
+                buy_sell=_s(raw.get("buy_sell")),
                 quantity=_flt(raw.get("quantity")),
-                unit=raw.get("unit"),
+                unit=_s(raw.get("unit")),
                 price=_flt(raw.get("price")),
-                delivery_start=str(raw["delivery_start"]) if raw.get("delivery_start") else None,
-                delivery_end=str(raw["delivery_end"]) if raw.get("delivery_end") else None,
-                counterparty=raw.get("counterparty"),
-                client_account=raw.get("client_account"),
+                delivery_start=_s(raw.get("delivery_start")),
+                delivery_end=_s(raw.get("delivery_end")),
+                counterparty=_s(raw.get("counterparty")),
+                client_account=_s(raw.get("client_account")) or _s(top_client_account),
                 brokerage_rate=_flt(raw.get("brokerage_rate")),
                 brokerage_amount=_flt(raw.get("brokerage_amount")),
-                currency=raw.get("currency"),
+                currency=_s(raw.get("currency")) or _s(top_currency),
             ))
         except Exception as exc:
             logger.warning("Skipping trade row: %s", exc)
@@ -758,8 +942,9 @@ def _deduplicate_trades(trades: list[TradeRecord]) -> list[TradeRecord]:
     seen_tid: dict[str, int] = {}   # trade_id → count of distinct fingerprints
     unique: list[TradeRecord] = []
     for t in trades:
-        # Full fingerprint — catches true duplicates from chunk overlap
-        fp = f"{t.trade_id}|{t.trade_date}|{t.instrument}|{t.quantity}|{t.price}|{t.buy_sell}"
+        # Full fingerprint — includes delivery_start so trades with same ID but
+        # different delivery terms (Jan-26, Feb-26, Mar-26) are kept as separate trades
+        fp = f"{t.trade_id}|{t.trade_date}|{t.instrument}|{t.quantity}|{t.price}|{t.buy_sell}|{t.delivery_start}"
         if fp in seen_fp:
             continue
         seen_fp.add(fp)

@@ -11,7 +11,7 @@ from broker_recon_flow.config import get_server_config
 from broker_recon_flow.db.database import init_db
 from broker_recon_flow.services.ms_data_service import load_ms_data
 from broker_recon_flow.utils.logger import get_logger
-from broker_recon_flow.backend.api.routes import upload, pipeline, download, status
+from broker_recon_flow.backend.api.routes import upload, pipeline, download, status, batch
 
 logger = get_logger(__name__)
 
@@ -22,8 +22,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up — initialising DB and MS data")
     init_db()
     load_ms_data()
+    # Start batch file watcher
+    from broker_recon_flow.services.batch_processor import start_watcher, stop_watcher
+    start_watcher()
     logger.info("Ready.")
     yield
+    stop_watcher()
     logger.info("Shutdown complete.")
 
 
@@ -47,6 +51,7 @@ app.include_router(upload.router, prefix="/api", tags=["upload"])
 app.include_router(pipeline.router, prefix="/api/pipeline", tags=["pipeline"])
 app.include_router(download.router, prefix="/api/download", tags=["download"])
 app.include_router(status.router, prefix="/api/status", tags=["status"])
+app.include_router(batch.router, prefix="/api/batch", tags=["batch"])
 
 
 @app.get("/health")
